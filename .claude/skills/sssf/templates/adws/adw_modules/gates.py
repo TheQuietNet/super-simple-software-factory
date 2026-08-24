@@ -131,15 +131,19 @@ def new_tests_are_discoverable(envelope: EnvelopeBase, run) -> GateReport:
     written to catch, because it defaulted to allow.
 
     So: any claimed file that LOOKS like a test — by name, anywhere in the tree —
-    must sit under tests/ AND end in .test.js. Claiming no test file at all is
-    also a failure (9d3e1718). A default of "no opinion" is what let two
-    false-dones through; there is no not-applicable branch any more.
+    must sit under tests/. Claiming no test file at all is also a failure
+    (9d3e1718). A default of "no opinion" is what let two false-dones through;
+    there is no not-applicable branch any more.
+
+    Placement is fail-closed and language-agnostic (ests/ still fails;
+    tests/test_foo.py is allowed). The per-repo runner glob lives in
+    quality.py, not here.
     """
     report = GateReport()
     looks_like_test = [
         f for f in getattr(envelope, "changed_files", [])
         if ".test." in Path(f).name or Path(f).name.startswith("test_")
-        or "test" in Path(f).parent.name.lower()
+        or Path(f).parent.name.lower() in ("test", "tests", "__tests__")
     ]
     if not looks_like_test:
         # 9d3e1718 claimed only substack/fetch-substack.js, no test, and this
@@ -150,12 +154,12 @@ def new_tests_are_discoverable(envelope: EnvelopeBase, run) -> GateReport:
         return report
     for f in looks_like_test:
         norm = f.replace("\\", "/")
-        ok = norm.startswith("tests/") and norm.endswith(".test.js")
+        ok = norm.startswith("tests/")
         report.check(f, ok,
-                     "under tests/ and matches the runner glob" if ok else
-                     "WILL NEVER RUN — this repo's runner collects ONLY "
-                     "tests/**/*.test.js. Place it directly under tests/ "
-                     "(not ests/, not src/) and end the name in .test.js")
+                     "under tests/" if ok else
+                     "WILL NEVER RUN — a file that looks like a test must sit "
+                     "under tests/ (not ests/, not src/). The runner glob is "
+                     "per-repo in quality.py.")
     return report
 
 
