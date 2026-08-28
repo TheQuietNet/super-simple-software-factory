@@ -39,10 +39,10 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                description="Capture the incoming ask")) as ph:
         ph.log(input=prompt)
 
-    with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
+    with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the request")) as ph:
         previous = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt,
-                                     gates=[gates.diff_matches_claims]))
+                                     gates=gates.BUILDER_GATES))
 
     review = None
     for i in range(1, MAX_REVISION_LOOPS + 1):
@@ -61,7 +61,7 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         with run.phase(PhaseParams(name=f"revise_{i}", kind="agent", owner="builder", retries=1,
                                    description="Close every blocking finding the reviewer named")) as ph:
             previous = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=review,
-                                         gates=[gates.diff_matches_claims]))
+                                         gates=gates.BUILDER_GATES))
 
     return run.finish(accepted=review is not None and review.approved,
                       reason=f"the reviewer never approved after {MAX_REVISION_LOOPS} revision(s)")

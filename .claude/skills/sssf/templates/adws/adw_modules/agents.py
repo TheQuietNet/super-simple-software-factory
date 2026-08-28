@@ -15,11 +15,13 @@ from typing import Optional
 
 import yaml
 
-from . import agent_pi, permissions, prompts
+from . import agent_cc, agent_pi, permissions, prompts
 from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
-                         GateCheck, GateReport, Phase, PiRequest, SSSFConfig,
-                         UsageBreakdown)
+                         GateCheck, GateReport, Phase, PiRequest, PiResult,
+                         SSSFConfig, UsageBreakdown)
 from .utils import new_id
+
+_SUPPORTED_CODING_AGENTS = ("pi", "claude_code")
 
 JSON_FIX_ATTEMPTS = 2      # continue-with-correction attempts for malformed JSON
 
@@ -58,17 +60,23 @@ def validate(cfg: SSSFConfig, required: list[str]) -> None:
         except SystemExit as e:
             problems.append(str(e))
             continue
-        if agent.coding_agent != "pi":
-            problems.append(f"agent {name!r}: coding_agent {agent.coding_agent!r} "
-                            f"is not implemented in v1 (pi only)")
+        if agent.coding_agent not in _SUPPORTED_CODING_AGENTS:
+            problems.append(
+                f"agent {name!r}: coding_agent {agent.coding_agent!r} "
+                f"is not supported (want one of {_SUPPORTED_CODING_AGENTS})")
         for label, ref in (("system", agent.prompt_engineering.system),
                            ("user", agent.prompt_engineering.user)):
             if not Path(ref).is_file():
                 problems.append(f"agent {name!r}: {label} prompt not found: {ref}")
-        try:
-            agent_pi.resolve_model(agent.model)
-        except ValueError as e:
-            problems.append(f"agent {name!r}: {e}")
+        if agent.coding_agent == "pi":
+            try:
+                agent_pi.resolve_model(agent.model)
+            except ValueError as e:
+                problems.append(f"agent {name!r}: {e}")
+        elif agent.coding_agent == "claude_code":
+            # Claude aliases are loose; only fail if empty
+            if not (agent.model or "").strip():
+                problems.append(f"agent {name!r}: model is empty")
     if problems:
         raise SystemExit("config validation failed:\n- " + "\n- ".join(problems))
 
@@ -86,6 +94,8 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
         "previous_envelope": call.previous.model_dump_json(indent=2) if call.previous else "(none)",
         "context_handoff_dir": str(run.context_handoff_dir),
     }
+    # Gates read the original ask (Where:) off the run, not the envelope.
+    run.request = call.prompt
     system_text = prompts.render(agent.prompt_engineering.system, variables)
     user_text = prompts.render(agent.prompt_engineering.user, variables)
     prompts.save(agent_dir / "prompts", "system.md", system_text)
@@ -103,34 +113,44 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
                                           "harness_engineering": agent.harness_engineering}))
     run.console.agent_started(agent.name, agent.model, session_id)
 
-    # Parse retries and gate corrections re-enter the SAME pi session, so the
-    # last send is the one whose context occupancy is current — while spend is
-    # the opposite: every send costs, so usage accumulates across all of them.
-    latest: agent_pi.PiResult | None = None
+    # Parse retries and gate corrections re-enter the SAME coding-agent session,
+    # so the last send is the one whose context occupancy is current — while
+    # spend is the opposite: every send costs, so usage accumulates.
+    latest: PiResult | None = None
     spent = UsageBreakdown()
+    turn = 0  # first turn creates the session; later turns resume it (Claude)
 
-    def send(prompt_text: str) -> agent_pi.PiResult:
-        nonlocal latest
+    def send(prompt_text: str) -> PiResult:
+        nonlocal latest, turn
+        turn += 1
+        session_subdir = ("claude_sessions" if agent.coding_agent == "claude_code"
+                          else "pi_sessions")
         request = PiRequest(
             prompt=prompt_text,
             system_prompt=system_text,
             model=agent.model,
             thinking=agent.thinking,
             session_id=session_id,
-            # absolute: these are read by the pi subprocess, which runs in repo_root
-            session_dir=str((agent_dir / "pi_sessions").resolve()),
+            # absolute: read by the subprocess, which runs in repo_root
+            session_dir=str((agent_dir / session_subdir).resolve()),
             raw_output_path=str((agent_dir / "raw_output.jsonl").resolve()),
             tools=agent.tools,
             extensions=agent.harness_engineering,
             cwd=str(run.repo_root),
         )
-        result = agent_pi.run(
-            request,
+        runner = agent_cc if agent.coding_agent == "claude_code" else agent_pi
+        run_kwargs = dict(
             on_event=_event_forwarder(run, phase, agent.name),
             on_spawn=lambda pid: run.tracer.process_start(
                 run.adw_id, "agent", agent.name, pid,
                 f"{agent.coding_agent} {agent.name} {agent.model}"),
-            on_exit=lambda pid: run.tracer.process_end(run.adw_id, pid))
+            on_exit=lambda pid: run.tracer.process_end(run.adw_id, pid),
+        )
+        if agent.coding_agent == "claude_code":
+            # turn 1 = --session-id (create); later = --resume (same window)
+            result = runner.run(request, resume=(turn > 1), **run_kwargs)
+        else:
+            result = runner.run(request, **run_kwargs)
         run.add_usage(result.tokens, result.cost)
         spent.merge(result.usage)
         latest = result
@@ -188,6 +208,18 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
         run.tracer.event(EventRecord(adw_id=run.adw_id, phase_id=phase.phase_id,
                                      type="log", name="paths_touched",
                                      payload={"agent": agent.name, "paths": touched}))
+        # Accumulate the run's agent-attributed change-set so a later commit
+        # phase can stage exactly this and nothing else. `touched` is already
+        # the authoritative answer — permissions.enforce derives it by diffing
+        # the worktree before and after THIS agent call — it was simply never
+        # carried forward, so commit_all fell back to `git add -A` and swept up
+        # whatever else happened to be dirty (live: adw_id f501b92a committed
+        # the operator's own uncommitted gate edits alongside the agent's work).
+        if not hasattr(run, "agent_touched_paths"):
+            run.agent_touched_paths = []
+        for path in touched:
+            if path not in run.agent_touched_paths:
+                run.agent_touched_paths.append(path)
 
     _persist_envelope(run, phase, agent.name, call, envelope, attempt, valid=True)
     run.console.envelope_summary(envelope)

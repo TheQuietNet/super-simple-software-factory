@@ -31,7 +31,7 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
     with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the request")) as ph:
         ph.call(AgentCall(output_type=BuildOutput, prompt=prompt,
-                          gates=[gates.diff_matches_claims]))
+                          gates=gates.BUILDER_GATES))
 
     return run.finish()
 

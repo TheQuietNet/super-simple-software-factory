@@ -80,11 +80,22 @@ def _glob(pattern: str) -> re.Pattern:
     fnmatch would let `*` cross `/`, which quietly widens every pattern:
     `adws/adw_*.py` would match `adws/adw_data/sessions/x/y.py` as well as the
     ADW scripts it means. `**` is the way to say "cross directories".
+
+    `**/` matches ZERO or more leading directories, the way git and every other
+    glob dialect read it. Translating it to `.*/` — which was the first version
+    — silently requires at least one directory, so the roster's
+    `**/settings*.json` covered `app/settings.json` but NOT a `settings.json` at
+    the repo root. That pattern is the Tier-C guard for exactly the file most
+    likely to sit at the root, and #52882 ports this translator into the skill
+    templates, so the off-by-one would have shipped to every future stamp.
     """
     out, i = [], 0
     while i < len(pattern):
         char = pattern[i]
-        if pattern.startswith("**", i):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")             # zero OR more leading directories
+            i += 3
+        elif pattern.startswith("**", i):
             out.append(".*")
             i += 2
         elif char == "*":
@@ -124,14 +135,40 @@ def always_writable(cfg: SSSFConfig) -> list[str]:
     return [cfg.defaults.data_dir.rstrip("/") + "/"]
 
 
-def permitted(path: str, agent: AgentConfig, cfg: SSSFConfig) -> bool:
-    """Session runtime first, then the agent's own list, then what is protected."""
-    if any(_matches(path, p) for p in always_writable(cfg)):
-        return True
+def _tracked(run) -> frozenset[str]:
+    """Every path git tracks, repo-relative — `-z` so odd names are not quoted."""
+    listing = _git(["ls-files", "-z"], run.repo_root)
+    return frozenset(p.strip().replace("\\", "/") for p in listing.split("\0") if p.strip())
+
+
+def permitted(path: str, agent: AgentConfig, cfg: SSSFConfig,
+              tracked: frozenset[str] = frozenset()) -> bool:
+    """The agent's own list, then what is protected, then the session runtime.
+
+    Order is the whole security property here, and the first version had it
+    backwards. `always_writable` was consulted FIRST, so the blanket `data_dir/`
+    grant outranked `protected_files` — and this roster's `data_dir` is
+    `adws/adw_data`, which holds twelve TRACKED files: every agent's `system.md`
+    and `user.md`, plus the harness extensions. The effect was that any agent,
+    including a `writes: []` scout or reviewer, could rewrite the builder's
+    system prompt and no breach would be raised. The module's whole premise is
+    that an agent must not be able to edit the machinery that grades it; the
+    prompts ARE that machinery, and they were the one part left open.
+
+    So: protection outranks every blanket grant. The `data_dir` grant survives
+    for what it was actually for — an agent's own report, envelope and raw
+    output, which are UNTRACKED by design (see `always_writable`). A tracked
+    file that happens to sit under `data_dir` is repo content, and stays
+    governed by `writes` like any other repo content. `tracked` defaults to
+    empty so a caller that cannot cheaply supply it degrades to the pre-existing
+    prefix behaviour rather than failing open on a name it cannot classify.
+    """
     if any(_matches(path, p) for p in (agent.writes or [])):
         return True                      # naming a path is what unlocks a protected one
     if any(_matches(path, p) for p in cfg.defaults.protected_files):
         return False
+    if any(_matches(path, p) for p in always_writable(cfg)) and path not in tracked:
+        return True
     return agent.writes is None          # None = unrestricted, [] = no repo writes
 
 
@@ -172,7 +209,8 @@ def enforce(run, phase, agent: AgentConfig, before: dict[str, str]) -> list[str]
     """
     after = snapshot(run)
     touched = changed_paths(before, after)
-    breaches = [p for p in touched if not permitted(p, agent, run.cfg)]
+    tracked = _tracked(run)              # resolved once; `permitted` is called per path
+    breaches = [p for p in touched if not permitted(p, agent, run.cfg, tracked)]
     if not breaches:
         return touched
 
