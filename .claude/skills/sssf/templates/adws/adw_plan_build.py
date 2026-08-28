@@ -33,15 +33,19 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         plan = ph.call(AgentCall(output_type=PlanOutput, prompt=prompt,
                                  gates=[gates.artifacts_exist, gates.files_non_empty]))
 
-    with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
+    with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the plan exactly")) as ph:
         build = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=plan,
-                                  gates=[gates.diff_matches_claims]))
+                                  gates=gates.BUILDER_GATES))
 
     with run.phase(PhaseParams(name="commit", kind="code", owner="git",
                                description="Land the builder's changes, using the message it wrote")) as ph:
         message = build.commit_message or f"sssf({run.adw_id}): {build.summary}"
-        ph.log(sha=git_helper.commit_all(message), message=message)
+        # Only the agents' own change-set — see git_helper.commit_paths.
+        touched = getattr(run, "agent_touched_paths", [])
+        ph.log(sha=git_helper.commit_paths(message, touched),
+               message=message, staged=touched)
+        run.agent_touched_paths = []
 
     return run.finish()
 

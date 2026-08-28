@@ -141,7 +141,18 @@ def test(run) -> QualityCheckResult:
         name="test",
         area="backend",
         operation="build",
-        argv=_placeholder("test"),        # e.g. ["bun", "test"] or ["uv", "run", "pytest", "-q"]
+        # REAL command for this repo — this IS package.json's "test" script,
+        # invoked directly rather than through npm.
+        #
+        # WHY NOT ["npm", "test"]: on Windows npm is a .cmd shim, and
+        # subprocess.run with an argv list and no shell cannot exec a .cmd —
+        # it fails with exit 127 / WinError 2 (hit live 2026-08-23). `node` is a
+        # real .exe, so a bare-name argv resolves on Windows, macOS and Linux
+        # alike, which keeps this repo's gate portable across the fleet.
+        #
+        # The glob stays a single literal argument: node --test expands it
+        # itself (Node 22+), exactly as the quoted form in package.json does.
+        argv=["node", "--test", "tests/**/*.test.js"],
         timeout_seconds=600,
     ), run)
 
@@ -218,11 +229,16 @@ def run_quality(run) -> QualityResult:
     The runner did its job; the CODE is what failed. Hand this result to the
     builder and let the bounded repair loop decide the run's fate.
     """
+    # ONLY `test` is wired for this repo. lint / typecheck / build are left
+    # defined but deliberately OUT of this list: they still return
+    # _placeholder(...) echoes that exit 0, and a check that always passes is
+    # worse than no check — it reports green while measuring nothing. Add one
+    # back the same day you give it a real argv, not before.
+    #
+    # This repo has no lint, typecheck, or build step configured (plain CommonJS
+    # Node, no TS, no bundler), so `test` is the whole quality gate today.
     blocks: list[Callable] = [
         test,
-        lint,
-        typecheck,
-        build,
     ]
     checks = [block(run) for block in blocks]
     # A failure is the command, its exit code, and what it actually printed —

@@ -40,10 +40,10 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         plan = ph.call(AgentCall(output_type=PlanOutput, prompt=prompt,
                                  gates=[gates.artifacts_exist, gates.files_non_empty]))
 
-    with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
+    with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the plan exactly")) as ph:
         previous = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=plan,
-                                     gates=[gates.diff_matches_claims]))
+                                     gates=gates.BUILDER_GATES))
 
     def record(ph, result) -> None:
         passed = sum(1 for check in result.checks if check.passed)
@@ -75,7 +75,7 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                    description=f"Resolve the reported {what} failures")) as ph:
             previous = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt,
                                          previous=quality.as_envelope(broken, what),
-                                         gates=[gates.diff_matches_claims]))
+                                         gates=gates.BUILDER_GATES))
 
     verified = (quality_result is not None and quality_result.passed
                 and test_result is not None and test_result.passed)
@@ -83,7 +83,11 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         with run.phase(PhaseParams(name="commit", kind="code", owner="git",
                                    description="Commit the tested and quality-verified working tree")) as ph:
             message = previous.commit_message or f"sssf({run.adw_id}): {previous.summary}"
-            ph.log(sha=git_helper.commit_all(message), message=message)
+            # Only the agents' own change-set — see git_helper.commit_paths.
+            touched = getattr(run, "agent_touched_paths", [])
+            ph.log(sha=git_helper.commit_paths(message, touched),
+                   message=message, staged=touched)
+            run.agent_touched_paths = []
 
     return run.finish(accepted=verified,
                       reason=f"verify/test never came back clean after {MAX_FIX_LOOPS} fix attempt(s)")

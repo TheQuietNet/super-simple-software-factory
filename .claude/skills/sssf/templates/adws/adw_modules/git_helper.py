@@ -40,15 +40,55 @@ def repo_root() -> Path:
     return Path.cwd().resolve()
 
 
-def commit_all(message: str) -> str:
-    """Stage the working tree and commit it. Returns the new short sha."""
+def _require_repo() -> None:
     if not is_repo():
         raise RuntimeError(
             "not a git repository — a commit phase needs one. Run `git init` in the "
             "repo root (and make a first commit) before running an ADW that commits.")
+
+
+def commit_all(message: str) -> str:
+    """Stage the ENTIRE working tree and commit it. Returns the new short sha.
+
+    ⚠️  Prefer `commit_paths()`. This stages `git add -A`, so it commits every
+    dirty path in the repo — including work the agents never touched. Live on
+    2026-08-24 (adw_id f501b92a) that swept the operator's own uncommitted edits
+    into the agent's commit, attributing them to the run. Kept for ADWs that
+    genuinely mean "commit everything", and for a non-agent code phase where
+    there is no attributed change-set to narrow to.
+    """
+    _require_repo()
     _git("add", "-A")
     if not _git("status", "--porcelain"):
         raise RuntimeError("nothing to commit — the preceding phases changed no files")
+    _git("commit", "-m", message)
+    return _git("rev-parse", "--short", "HEAD")
+
+
+def commit_paths(message: str, paths: list[str]) -> str:
+    """Stage ONLY `paths` and commit them. Returns the new short sha.
+
+    `paths` is the run's agent-attributed change-set — what permissions.enforce
+    observed each agent actually write, accumulated on the run as
+    `agent_touched_paths`. Staging that set instead of the whole tree keeps a
+    commit honest in both directions: unrelated dirty files stay out, and a
+    builder that wrote nothing produces no commit at all rather than silently
+    committing someone else's work under its message.
+
+    Deletions are included — `git add --` records a removed path the same way it
+    records a modified one, and a file the agent deleted is part of its change.
+    """
+    _require_repo()
+    if not paths:
+        raise RuntimeError(
+            "nothing to commit — no agent phase in this run touched a tracked file. "
+            "A build phase that changed nothing has not built anything; refusing to "
+            "commit the working tree on its behalf.")
+    _git("add", "--", *paths)
+    if not _git("diff", "--cached", "--name-only"):
+        raise RuntimeError(
+            f"nothing staged from the agent change-set ({len(paths)} path(s) claimed: "
+            f"{', '.join(paths[:5])}). Every one is unchanged, ignored, or absent.")
     _git("commit", "-m", message)
     return _git("rev-parse", "--short", "HEAD")
 

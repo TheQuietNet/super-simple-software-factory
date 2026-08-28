@@ -65,9 +65,19 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
     baseline = git_helper.rev("HEAD")     # pinned before this run commits anything
 
     def commit(ph, envelope) -> None:
-        """Commit what the preceding phase produced, in that agent's own words."""
+        """Commit what the preceding phase produced, in that agent's own words.
+
+        Stages ONLY the agent-attributed change-set, then DRAINS it. This chain
+        commits more than once, so the drain matters: without it the second
+        commit would re-stage paths the first already landed, find them clean,
+        and fail with "nothing staged". Draining makes each commit contain
+        exactly the work of the phases since the previous one.
+        """
         message = envelope.commit_message or f"sssf({run.adw_id}): {envelope.summary}"
-        ph.log(sha=git_helper.commit_all(message), message=message)
+        touched = getattr(run, "agent_touched_paths", [])
+        ph.log(sha=git_helper.commit_paths(message, touched),
+               message=message, staged=touched)
+        run.agent_touched_paths = []
 
     def record(ph, result) -> None:
         """Log a deterministic block's verdict — the same shape every ADW uses."""
@@ -88,10 +98,10 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                description="Put the spec on record before any code exists to blur it")) as ph:
         commit(ph, plan)
 
-    with run.phase(PhaseParams(name="build", kind="agent", owner="builder",
+    with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the plan exactly")) as ph:
         build = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=plan,
-                                  gates=[gates.diff_matches_claims]))
+                                  gates=gates.BUILDER_GATES))
 
     test = None
     for i in range(1, MAX_FIX_LOOPS + 1):
@@ -109,7 +119,7 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                                "verbatim output")) as ph:
             build = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt,
                                       previous=quality.as_envelope(test, "tests"),
-                                      gates=[gates.diff_matches_claims]))
+                                      gates=gates.BUILDER_GATES))
 
     review = None
     revised = False
@@ -125,7 +135,7 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         with run.phase(PhaseParams(name=f"revise_{i}", kind="agent", owner="builder", retries=1,
                                    description="Close the reviewer's blocking findings")) as ph:
             build = ph.call(AgentCall(output_type=BuildOutput, prompt=prompt, previous=review,
-                                      gates=[gates.diff_matches_claims]))
+                                      gates=gates.BUILDER_GATES))
             revised = True
 
     # A revision edited code after the suite last ran, so the green light is

@@ -19,7 +19,36 @@ from typing import Callable, Optional
 from .data_types import PiRequest, PiResult
 from .utils import now_iso, operator_env
 
-PI_PATH = os.environ.get("PI_PATH", "pi")
+def _resolve_pi_path() -> str:
+    """Locate the pi CLI for subprocess use (Windows npm shims need a real path).
+
+    Prefer the Node entrypoint over pi.cmd: cmd.exe mangles multiline
+    --system-prompt values, so pi exits after writing only a session header.
+    """
+    explicit = os.environ.get("PI_PATH")
+    if explicit:
+        return explicit
+    if os.name == "nt":
+        npm = Path(os.environ.get("APPDATA", "")) / "npm"
+        # Pi 0.84+ ships as @earendil-works; older installs were @mariozechner.
+        # Prefer dist/cli.js over pi.cmd — cmd.exe mangles multiline
+        # --system-prompt and pi then exits after a session header only
+        # (ywh-52340 first builder: 1.7s, empty JSON).
+        for scope in ("@earendil-works", "@mariozechner"):
+            for rel in (
+                Path("pi-coding-agent") / "dist" / "cli.js",
+                Path("pi-coding-agent") / "dist" / "bundle" / "cli.js",
+            ):
+                cli = npm / "node_modules" / scope / rel
+                if cli.is_file():
+                    return str(cli)
+        cmd = npm / "pi.cmd"
+        if cmd.is_file():
+            return str(cmd)
+    return "pi"
+
+
+PI_PATH = _resolve_pi_path()
 MODELS_JSON = os.environ.get("PI_MODELS_PATH",
                              str(Path.home() / ".pi" / "agent" / "models.json"))
 
@@ -40,20 +69,30 @@ def _count(value: str) -> int:
     return int(value)
 
 
+def _pi_argv(*args: str) -> list[str]:
+    """Build argv for pi. On Windows, .js entrypoints need node as argv0."""
+    if PI_PATH.lower().endswith(".js"):
+        return ["node", PI_PATH, *args]
+    return [PI_PATH, *args]
+
+
 @lru_cache(maxsize=1)
 def _pi_catalog() -> list[tuple[str, str, int]]:
     """Read pi's merged catalog, including built-in providers and custom models."""
     try:
         result = subprocess.run(
-            [PI_PATH, "--list-models"], capture_output=True, text=True,
+            _pi_argv("--list-models"), capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=30, env=operator_env(), check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
     if result.returncode != 0:
         return []
+    # pi writes --list-models to stderr when stdout is not a TTY (subprocess capture)
+    text = result.stdout if result.stdout.strip() else result.stderr
     rows = []
-    for line in result.stdout.splitlines()[1:]:
+    for line in text.splitlines()[1:]:
         columns = line.split()
         if len(columns) < 3:
             continue
@@ -215,14 +254,20 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     to hunt for in `ps` while the run sits there.
     """
     provider, model_id = resolve_model(request.model)
-    cmd = [
-        PI_PATH, "-p", "--mode", "json",
+    # Current pi treats --session as path|existing-id (lookup), not create-or-continue
+    # by bare id. Pass an explicit session file under session_dir so first turn
+    # creates and later turns rejoin the same context window.
+    session_dir = Path(request.session_dir)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_file = str(session_dir / f"{request.session_id}.jsonl")
+    cmd = _pi_argv(
+        "-p", "--mode", "json",
         "--provider", provider, "--model", model_id,
         "--thinking", request.thinking,
-        "--session-id", request.session_id,
-        "--session-dir", request.session_dir,
+        "--session", session_file,
+        "--session-dir", str(session_dir),
         "--system-prompt", request.system_prompt,
-    ]
+    )
     if request.tools:
         cmd += ["--tools", ",".join(request.tools)]
     for extension in request.extensions:
@@ -242,11 +287,12 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
     # a run that sat idle at 0% CPU with an empty raw_output.jsonl.
     process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, bufsize=1, cwd=request.cwd,
+                               text=True, encoding="utf-8", errors="replace",
+                               bufsize=1, cwd=request.cwd,
                                env=operator_env())
     if on_spawn:
         on_spawn(process.pid)
-    with raw_path.open("a") as raw:
+    with raw_path.open("a", encoding="utf-8") as raw:
         assert process.stdout is not None
         for line in process.stdout:
             raw.write(line)
