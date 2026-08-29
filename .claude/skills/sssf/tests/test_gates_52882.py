@@ -96,7 +96,9 @@ def test_pytest_path_passes():
 def test_latest_dir_is_not_a_test():
     report = gates.new_tests_are_discoverable(
         _env(["src/latest/widget.js"]), SimpleNamespace())
-    assert report.passed
+    # src/latest/widget.js is not a test-like name, so #52939 (9d3e1718)
+    # fail-closed: envelope claims no test file.
+    assert not report.passed
     assert all(c.item != "src/latest/widget.js" for c in report.checks)
 
 
@@ -113,7 +115,7 @@ def test_new_untracked_nested_file_passes(tmp_path: Path):
 def test_no_test_claim_is_still_a_check_not_not_applicable():
     report = gates.new_tests_are_discoverable(_env(["pull-video.js"]), SimpleNamespace())
     assert report.checks, "fail-closed: must record a check, not return empty/not-applicable"
-    assert report.passed
+    assert not report.passed  # #52939 9d3e1718: no test claimed is a failure
     src = ast.parse((TEMPLATES_ADWS / "adw_modules" / "gates.py").read_text(encoding="utf-8"))
     fn = next(n for n in src.body if isinstance(n, ast.FunctionDef) and n.name == "new_tests_are_discoverable")
     returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
