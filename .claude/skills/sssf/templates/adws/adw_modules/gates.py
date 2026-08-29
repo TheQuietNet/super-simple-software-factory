@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .data_types import EnvelopeBase, GateReport
+from . import quality
 
 TAIL_CHARS = 1000        # command output kept as evidence on a failure
 
@@ -105,6 +106,29 @@ def diff_matches_claims(envelope: EnvelopeBase, run) -> GateReport:
     return report
 
 
+def _runner_test_glob() -> str | None:
+    """quality.TEST_GLOB, or None if missing/placeholder (fail closed)."""
+    raw = getattr(quality, "TEST_GLOB", None)
+    if raw is None:
+        return None
+    text = str(raw).strip().replace("\\", "/")
+    if not text or "PLACEHOLDER" in text.upper():
+        return None
+    return text
+
+
+def _matches_test_glob(path: str, pattern: str) -> bool:
+    """Glob match with `**` meaning zero or more directories (pathlib 3.12
+    `PurePosixPath.match('a/**/*.js')` does not match `a/foo.js`)."""
+    norm = path.replace("\\", "/").lstrip("./")
+    pat = pattern.replace("\\", "/").lstrip("./")
+    p = PurePosixPath(norm)
+    if p.match(pat):
+        return True
+    collapsed = pat.replace("**/", "")
+    return collapsed != pat and p.match(collapsed)
+
+
 def new_tests_are_discoverable(envelope: EnvelopeBase, run) -> GateReport:
     """A test file the runner cannot see is not a test.
 
@@ -115,29 +139,20 @@ def new_tests_are_discoverable(envelope: EnvelopeBase, run) -> GateReport:
     After: 493. Every existing gate passed, and the ADW committed.
 
     `tests_pass` cannot catch this: a suite that never grew still exits 0. This
-    gate checks the NAMES instead — anything the agent added under tests/ must
-    match the pattern the runner actually collects, so an unrunnable test fails
-    the phase in-session and the builder gets a chance to rename it.
+    gate checks the NAMES instead — anything the agent added that looks like a
+    test must match `quality.TEST_GLOB` (the same glob `test()` passes to the
+    runner). Language-agnostic means the glob is the SoT, not a baked-in
+    `.test.js` suffix and not "anything under tests/". `tests/test_paragraphs.js`
+    in a `tests/**/*.test.js` repo MUST fail — that is the founding defect.
 
-    Deliberately narrow: it says nothing about whether a test is any good, only
-    that the runner can see it. That is the part a machine can settle.
+    FAIL-CLOSED. The first version keyed on the substring "tests/" and returned
+    "not applicable" when nothing matched. On the very next run (adw_id
+    f501b92a) the planner dropped a letter and the builder wrote
+    `ests/pull-video-paragraphs.test.js`. "ests/" does not contain "tests/",
+    so the gate said not-applicable and PASSED. There is no not-applicable
+    branch any more. A missing/PLACEHOLDER TEST_GLOB also fails closed.
 
-    FAIL-CLOSED. The first version of this gate keyed on the substring "tests/"
-    and returned "not applicable" when nothing matched. On the very next run
-    (adw_id f501b92a) the planner dropped a letter and the builder wrote
-    `ests/pull-video-paragraphs.test.js` — 45 real lines, in a directory that
-    does not exist in this repo. "ests/" does not contain "tests/", so the gate
-    said not-applicable and PASSED. It reproduced the exact defect it was
-    written to catch, because it defaulted to allow.
-
-    So: any claimed file that LOOKS like a test — by name, anywhere in the tree —
-    must sit under tests/. Claiming no test file at all is also a failure
-    (9d3e1718). A default of "no opinion" is what let two false-dones through;
-    there is no not-applicable branch any more.
-
-    Placement is fail-closed and language-agnostic (ests/ still fails;
-    tests/test_foo.py is allowed). The per-repo runner glob lives in
-    quality.py, not here.
+    Claiming no test file at all is a failure (9d3e1718).
     """
     report = GateReport()
     looks_like_test = [
@@ -152,14 +167,23 @@ def new_tests_are_discoverable(envelope: EnvelopeBase, run) -> GateReport:
                      "envelope claims no test file — a build that adds no "
                      "discoverable test has not tested anything")
         return report
+    glob = _runner_test_glob()
     for f in looks_like_test:
         norm = f.replace("\\", "/")
-        ok = norm.startswith("tests/")
-        report.check(f, ok,
-                     "under tests/" if ok else
-                     "WILL NEVER RUN — a file that looks like a test must sit "
-                     "under tests/ (not ests/, not src/). The runner glob is "
-                     "per-repo in quality.py.")
+        if glob is None:
+            report.check(
+                f, False,
+                "WILL NEVER RUN — quality.TEST_GLOB is missing or PLACEHOLDER; "
+                "fail closed (no not-applicable). Set TEST_GLOB to the same "
+                "glob the test runner collects.")
+            continue
+        ok = _matches_test_glob(norm, glob)
+        report.check(
+            f, ok,
+            f"matches TEST_GLOB {glob}" if ok else
+            f"WILL NEVER RUN — {norm!r} does not match quality.TEST_GLOB "
+            f"{glob!r} (adw_id 615f4542: tests/test_paragraphs.js vs "
+            f"tests/**/*.test.js)")
     return report
 
 

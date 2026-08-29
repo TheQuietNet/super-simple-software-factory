@@ -19,10 +19,9 @@ SKILL = Path(__file__).resolve().parents[1]
 TEMPLATES_ADWS = SKILL / "templates" / "adws"
 sys.path.insert(0, str(TEMPLATES_ADWS))
 
-from adw_modules import gates, git_helper  # noqa: E402
+from adw_modules import gates, git_helper, quality  # noqa: E402
 from adw_modules.data_types import BuildOutput  # noqa: E402
 
-PILOT_MODULES = Path(r"C:\Users\chris\projects\_wt\ywh-factory\adws\adw_modules")
 COMMITTING_ADWS = (
     "adw_plan_build.py",
     "adw_plan_build_test.py",
@@ -82,15 +81,44 @@ def test_ests_near_miss_fails_discoverability():
 
 
 def test_discoverable_test_js_passes():
+    """Passes when TEST_GLOB (tests/**/*.test.js) matches."""
     report = gates.new_tests_are_discoverable(
         _env(["tests/pull-video-paragraphs.test.js"]), SimpleNamespace())
     assert report.passed
 
 
-def test_pytest_path_passes():
+def test_pytest_style_path_fails_against_node_test_glob():
+    """F1: tests/test_foo.py is NOT collectable by tests/**/*.test.js.
+    This is adw_id 615f4542 (tests/test_paragraphs.js, suite stayed 493/493)."""
+    report = gates.new_tests_are_discoverable(
+        _env(["tests/test_foo.py"]), SimpleNamespace())
+    assert not report.passed
+    assert any("WILL NEVER RUN" in c.note for c in report.checks if not c.ok)
+
+
+def test_nested_test_js_matches_glob():
+    report = gates.new_tests_are_discoverable(
+        _env(["tests/nested/foo.test.js"]), SimpleNamespace())
+    assert report.passed
+
+
+def test_unknown_test_glob_fails_closed(monkeypatch):
+    monkeypatch.setattr(quality, "TEST_GLOB", "")
+    report = gates.new_tests_are_discoverable(
+        _env(["tests/foo.test.js"]), SimpleNamespace())
+    assert not report.passed
+    assert any("PLACEHOLDER" in c.note or "missing" in c.note
+               for c in report.checks if not c.ok)
+
+
+def test_pytest_glob_allows_test_underscore_py(monkeypatch):
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/test_*.py")
     report = gates.new_tests_are_discoverable(
         _env(["tests/test_foo.py"]), SimpleNamespace())
     assert report.passed
+    report_js = gates.new_tests_are_discoverable(
+        _env(["tests/foo.test.js"]), SimpleNamespace())
+    assert not report_js.passed
 
 
 def test_latest_dir_is_not_a_test():
@@ -179,14 +207,5 @@ def test_fresh_stamp_carries_ported_gates(tmp_path: Path):
         text = (scratch / "adws" / name).read_text(encoding="utf-8")
         assert "commit_paths" in text, name
         assert "agent_touched_paths = []" in text, name
-    if PILOT_MODULES.is_dir():
-        for fname, needles in (
-            ("gates.py", ("def claims_are_actually_modified", "def new_tests_are_discoverable")),
-            ("git_helper.py", ("def commit_paths",)),
-            ("agents.py", ("agent_touched_paths",)),
-        ):
-            stamped = (scratch / "adws" / "adw_modules" / fname).read_text(encoding="utf-8")
-            pilot = (PILOT_MODULES / fname).read_text(encoding="utf-8")
-            for needle in needles:
-                assert needle in stamped
-                assert needle in pilot
+    stamped_quality = (scratch / "adws" / "adw_modules" / "quality.py").read_text(encoding="utf-8")
+    assert "TEST_GLOB" in stamped_quality
