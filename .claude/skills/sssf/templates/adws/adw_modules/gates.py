@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from .data_types import EnvelopeBase, GateReport
 from . import quality
@@ -117,16 +117,40 @@ def _runner_test_glob() -> str | None:
     return text
 
 
-def _matches_test_glob(path: str, pattern: str) -> bool:
-    """Glob match with `**` meaning zero or more directories (pathlib 3.12
-    `PurePosixPath.match('a/**/*.js')` does not match `a/foo.js`)."""
-    norm = path.replace("\\", "/").lstrip("./")
+def _glob_to_anchored_re(pattern: str) -> re.Pattern[str]:
+    """Translate a posix glob to an anchored regex. Not glob.translate (3.13)
+    and not PurePath.match (matches from the right; 3.12 `**` is one segment).
+
+    `**` → `(?:.*/)*` (zero or more directories — oracle needs
+    tests/a/b/foo.test.js; `(?:.*/)?` would only allow one extra segment).
+    `*` → `[^/]*`. `?` → `[^/]`. Everything else escaped. Wrapped `^...$`.
+    """
     pat = pattern.replace("\\", "/").lstrip("./")
-    p = PurePosixPath(norm)
-    if p.match(pat):
-        return True
-    collapsed = pat.replace("**/", "")
-    return collapsed != pat and p.match(collapsed)
+    i = 0
+    out: list[str] = []
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out.append("(?:.*/)*")
+            i += 3
+        elif pat.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pat[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pat[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
+def _matches_test_glob(path: str, pattern: str) -> bool:
+    """True iff posix-normalised `path` fullmatches `pattern` from the LEFT."""
+    norm = path.replace("\\", "/").lstrip("./")
+    return _glob_to_anchored_re(pattern).fullmatch(norm) is not None
 
 
 def new_tests_are_discoverable(envelope: EnvelopeBase, run) -> GateReport:

@@ -97,9 +97,25 @@ def test_pytest_style_path_fails_against_node_test_glob():
 
 
 def test_nested_test_js_matches_glob():
+    """One extra directory under tests/ (zero-depth is test_discoverable_test_js)."""
     report = gates.new_tests_are_discoverable(
         _env(["tests/nested/foo.test.js"]), SimpleNamespace())
     assert report.passed
+
+
+def test_deep_nested_test_js_matches_glob():
+    """Oracle (2): tests/a/b/foo.test.js PASSES (3.12 Path.match ** is one segment)."""
+    report = gates.new_tests_are_discoverable(
+        _env(["tests/a/b/foo.test.js"]), SimpleNamespace())
+    assert report.passed
+
+
+def test_src_tests_does_not_match_rooted_glob():
+    """Oracle (1): src/tests/foo.test.js FAILS — Path.match matches from the right."""
+    report = gates.new_tests_are_discoverable(
+        _env(["src/tests/foo.test.js"]), SimpleNamespace())
+    assert not report.passed
+    assert any("WILL NEVER RUN" in c.note for c in report.checks if not c.ok)
 
 
 def test_unknown_test_glob_fails_closed(monkeypatch):
