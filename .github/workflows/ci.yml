@@ -15,11 +15,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      # pydantic: templates/adws/adw_modules/data_types.py imports it, so any
-      # test that imports the gate modules cannot be collected without it
-      # (#52974 — sssf#1 sat red on ModuleNotFoundError: pydantic).
+      # Every third-party import under templates/adws (enumerated, not chased
+      # one ModuleNotFoundError at a time — #52974 first shipped pydantic alone
+      # and CI then died on dotenv): pydantic (data_types), pyyaml (agents),
+      # rich (console), python-dotenv (utils). Any test that imports the gate
+      # modules pulls this whole chain in at collection time.
       - name: Install test deps
-        run: python -m pip install --disable-pip-version-check pytest pydantic
+        run: python -m pip install --disable-pip-version-check pytest pydantic pyyaml rich python-dotenv
 
       # Skill-template tests live under .claude/skills/sssf/tests (added by
       # #52882). Until that PR lands this job still needs a collected test so
