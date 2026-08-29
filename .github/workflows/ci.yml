@@ -15,8 +15,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install pytest
-        run: python -m pip install --disable-pip-version-check pytest
+      # pydantic: templates/adws/adw_modules/data_types.py imports it, so any
+      # test that imports the gate modules cannot be collected without it
+      # (#52974 — sssf#1 sat red on ModuleNotFoundError: pydantic).
+      - name: Install test deps
+        run: python -m pip install --disable-pip-version-check pytest pydantic
 
       # Skill-template tests live under .claude/skills/sssf/tests (added by
       # #52882). Until that PR lands this job still needs a collected test so
