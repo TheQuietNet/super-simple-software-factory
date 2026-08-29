@@ -135,6 +135,13 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
 # ── Blocks ────────────────────────────────────────────────────────────────────
 # Replace every argv below. See the banner at the top of this file.
 
+# Same glob the test runner receives. `gates.new_tests_are_discoverable`
+# fnmatches claimed test paths against this. Replace TEST_GLOB together with
+# `test()`'s argv when you change runners. Empty or PLACEHOLDER → the gate
+# fails closed (no not-applicable branch).
+TEST_GLOB = "tests/**/*.test.js"
+
+
 def test(run) -> QualityCheckResult:
     """Run the project's test suite. The highest-value block to wire up first."""
     return _run(QualityCheckSpec(
@@ -152,7 +159,7 @@ def test(run) -> QualityCheckResult:
         #
         # The glob stays a single literal argument: node --test expands it
         # itself (Node 22+), exactly as the quoted form in package.json does.
-        argv=["node", "--test", "tests/**/*.test.js"],
+        argv=["node", "--test", TEST_GLOB],
         timeout_seconds=600,
     ), run)
 
