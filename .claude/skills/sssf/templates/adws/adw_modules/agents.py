@@ -15,13 +15,13 @@ from typing import Optional
 
 import yaml
 
-from . import agent_cc, agent_pi, permissions, prompts
+from . import agent_cc, agent_grok, agent_pi, permissions, prompts
 from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
                          GateCheck, GateReport, Phase, PiRequest, PiResult,
                          SSSFConfig, UsageBreakdown)
 from .utils import new_id
 
-_SUPPORTED_CODING_AGENTS = ("pi", "claude_code")
+_SUPPORTED_CODING_AGENTS = ("pi", "claude_code", "grok")
 
 JSON_FIX_ATTEMPTS = 2      # continue-with-correction attempts for malformed JSON
 
@@ -73,8 +73,7 @@ def validate(cfg: SSSFConfig, required: list[str]) -> None:
                 agent_pi.resolve_model(agent.model)
             except ValueError as e:
                 problems.append(f"agent {name!r}: {e}")
-        elif agent.coding_agent == "claude_code":
-            # Claude aliases are loose; only fail if empty
+        elif agent.coding_agent in ("claude_code", "grok"):
             if not (agent.model or "").strip():
                 problems.append(f"agent {name!r}: model is empty")
     if problems:
@@ -123,8 +122,10 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     def send(prompt_text: str) -> PiResult:
         nonlocal latest, turn
         turn += 1
-        session_subdir = ("claude_sessions" if agent.coding_agent == "claude_code"
-                          else "pi_sessions")
+        session_subdir = {
+            "claude_code": "claude_sessions",
+            "grok": "grok_sessions",
+        }.get(agent.coding_agent, "pi_sessions")
         request = PiRequest(
             prompt=prompt_text,
             system_prompt=system_text,
@@ -138,7 +139,12 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
             extensions=agent.harness_engineering,
             cwd=str(run.repo_root),
         )
-        runner = agent_cc if agent.coding_agent == "claude_code" else agent_pi
+        if agent.coding_agent == "claude_code":
+            runner = agent_cc
+        elif agent.coding_agent == "grok":
+            runner = agent_grok
+        else:
+            runner = agent_pi
         run_kwargs = dict(
             on_event=_event_forwarder(run, phase, agent.name),
             on_spawn=lambda pid: run.tracer.process_start(
@@ -146,8 +152,7 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
                 f"{agent.coding_agent} {agent.name} {agent.model}"),
             on_exit=lambda pid: run.tracer.process_end(run.adw_id, pid),
         )
-        if agent.coding_agent == "claude_code":
-            # turn 1 = --session-id (create); later = --resume (same window)
+        if agent.coding_agent in ("claude_code", "grok"):
             result = runner.run(request, resume=(turn > 1), **run_kwargs)
         else:
             result = runner.run(request, **run_kwargs)
