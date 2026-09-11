@@ -20,15 +20,15 @@ Implement the work described in `prompt`, guided by `previous_envelope` if prese
 
 ## Report
 
-Respond with ONLY valid JSON matching `BuildOutput` — no prose before or after:
+`changed_files` is every repo-relative path you wrote or edited this phase — the exact paths, including the test file. A JSON retry must still list them.
 
-```json
+Your entire reply is one raw JSON object. No markdown fence. No prose before or after. Last format shown is the contract:
+
 {
   "status": "success",
   "summary": "<one sentence describing what you built>",
-  "changed_files": ["src/server.ts"],
+  "changed_files": ["query.js", "tests/query-db.test.js"],
   "artifacts": [],
   "commit_message": "<imperative one-line git subject for the code you changed — this is what the commit of your work will say>",
   "notes_for_next_agent": "<how to verify this work>"
 }
-```
