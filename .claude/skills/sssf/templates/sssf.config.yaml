@@ -30,6 +30,11 @@ defaults:
     - adws/adw_modules/
     - adws/adw_sssf_config/
     - adws/adw_*.py
+    # The grader itself. An unrestricted builder that can rewrite
+    # justfile / adws/tests/ / scripts/ can make the quality gate lie.
+    - justfile
+    - adws/tests/
+    - scripts/
   data_dir: adws/adw_data          # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
 
 observability:
