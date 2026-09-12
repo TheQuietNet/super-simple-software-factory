@@ -13,6 +13,10 @@ def test_gates_module_exists():
     assert (MODULES / "gates.py").is_file()
 
 
+def test_agent_grok_module_exists():
+    assert (MODULES / "agent_grok.py").is_file()
+
+
 def test_git_helper_module_exists():
     assert (MODULES / "git_helper.py").is_file()
 
