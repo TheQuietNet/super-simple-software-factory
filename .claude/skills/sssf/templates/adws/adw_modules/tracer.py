@@ -124,7 +124,7 @@ class Tracer:
         event_id = f"evt_{new_id(12)}"
         ts = now_iso()
         line = {"event_id": event_id, "ts": ts, **record.model_dump()}
-        with self.events_jsonl.open("a") as f:
+        with self.events_jsonl.open("a", encoding="utf-8") as f:
             f.write(json.dumps(line) + "\n")
         self.conn.execute(
             "INSERT INTO events (event_id, adw_id, phase_id, parent_id, type, name,"

@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import agents, git_helper
+from . import agents, git_helper, isolation
 from .console import Console
 from .data_types import AgentCall, EnvelopeBase, EventRecord, Phase, PhaseParams
 from .utils import ensure_dir, now_iso
@@ -51,16 +51,17 @@ class Run:
         self.cost = 0.0
         self._seq = tracer.max_phase_seq(adw_id)   # a joined run continues the sequence
         self.repo_root = git_helper.repo_root()    # where every agent is spawned to work
+        git_helper.assert_cwd_matches_repo(self.repo_root)  # #53181: fail loud, before any phase
         self.session_dir = ensure_dir(Path(cfg.defaults.data_dir) / "sessions" / adw_id)
         self.context_handoff_dir = ensure_dir(self.session_dir / "context_handoff")
         self._agent_map_path = self.session_dir / "agent_map.json"
-        self.agent_map: dict = (json.loads(self._agent_map_path.read_text())
+        self.agent_map: dict = (json.loads(self._agent_map_path.read_text(encoding="utf-8"))
                                 if self._agent_map_path.exists() else {})
 
     # ── agent map (adw_id -> per-agent coding-agent session ids) ────────────
     def save_agent_map(self, agent: str, entry: dict) -> None:
         self.agent_map[agent] = entry
-        self._agent_map_path.write_text(json.dumps(self.agent_map, indent=2))
+        self._agent_map_path.write_text(json.dumps(self.agent_map, indent=2), encoding="utf-8")
 
     # ── usage (run totals mirror what the tracer accumulates in sqlite) ─────
     def add_usage(self, tokens: int, cost: float) -> None:
@@ -100,6 +101,15 @@ class Run:
             self.console.phase_ended(phase, time.monotonic() - clock)
             self.console.session_finished(False, self.tokens, self.cost,
                                           self.cfg.observability.db)
+            # #53192 round-2 (Codex finding #8): a phase that raises here
+            # propagates past every ADW script's own error handling, and
+            # self.finish() (the OTHER cleanup_run call site) may never run
+            # at all — this branch already treats the run as over, so it is
+            # the direct, deterministic place to sweep isolation copies too,
+            # not just the atexit fallback registered in session.ensure().
+            # Idempotent: a later finish()/atexit call is a no-op once this
+            # has already removed (or, with the flag, kept) the directory.
+            isolation.cleanup_run(self, ok=False)
             raise
         else:
             phase.status = "success"
@@ -139,4 +149,8 @@ class Run:
             self.console.note(f"not accepted: {note}")
         self.tracer.session_finish(self.adw_id, ok=ok)
         self.console.session_finished(ok, self.tokens, self.cost, self.cfg.observability.db)
+        # #53192: sweep every agent's isolated copy for this run. Kept on
+        # failure only when SSSF_KEEP_ISOLATION_ON_FAILURE is set, for
+        # post-mortem debugging — see isolation.cleanup_run's docstring.
+        isolation.cleanup_run(self, ok)
         return 0 if ok else 1

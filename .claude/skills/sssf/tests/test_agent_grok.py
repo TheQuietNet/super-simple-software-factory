@@ -7,7 +7,7 @@ from pathlib import Path
 SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL / "templates" / "adws"))
 
-from adw_modules import agent_grok
+from adw_modules import agent_budget, agent_grok
 from adw_modules.data_types import PiRequest
 
 
@@ -75,13 +75,24 @@ def test_run_parses_json_stdout(tmp_path: Path, monkeypatch):
             self.stdout = None
             self.stderr = None
 
-        def communicate(self):
+        def communicate(self, timeout=None):
+            # agent_grok.run() passes timeout=<remaining budget> to enforce
+            # the phase deadline; the fake must accept the same call shape
+            # the real subprocess.Popen.communicate() does.
             return payload, ""
 
     def fake_popen(*args, **kwargs):
         return FakeProc()
 
     monkeypatch.setattr(agent_grok.subprocess, "Popen", fake_popen)
+    # This test is about JSON-payload parsing, not process tracking — the
+    # FakeProc's pid (4242) is not a real OS process, so the real Job
+    # Object / taskkill machinery (unconditionally exercised inside
+    # agent_grok.run()'s own try) has nothing legitimate to track or kill
+    # here. track_for_kill is a no-op stand-in for this test;
+    # kill_process_tree/release_tracking are exercised for real in
+    # test_agent_budget.py.
+    monkeypatch.setattr(agent_budget, "track_for_kill", lambda pid: None)
     result = agent_grok.run(req)
     assert result.returncode == 0
     assert "success" in result.text

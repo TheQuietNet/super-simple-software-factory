@@ -22,6 +22,8 @@ Implement the work described in `prompt`, guided by `previous_envelope` if prese
 
 `changed_files` is every repo-relative path you wrote or edited this phase — the exact paths, including the test file. A JSON retry must still list them.
 
+**The Report below is your final chat response — raw JSON text you reply with, never a file.** Do not `write`, `edit`, or otherwise create a file named `Report.json` (or anything similar) to satisfy this section — there is no such file to produce. Reply with the JSON object directly, as your message.
+
 Your entire reply is one raw JSON object. No markdown fence. No prose before or after. Last format shown is the contract:
 
 {

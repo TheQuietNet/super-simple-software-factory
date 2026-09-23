@@ -1,4 +1,4 @@
-"""Claude Code interface — QuietNet spike (replaces the v1 NotImplemented stub).
+"""Claude Code interface — replaces the v1 NotImplemented stub.
 
 Mirrors `agent_pi.run` so `agents.execute` can dispatch by coding_agent.
 
@@ -21,8 +21,9 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import agent_budget
 from .data_types import PiRequest, PiResult, UsageBreakdown
-from .utils import now_iso
+from .utils import now_iso, operator_env
 
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "claude")
 # Namespace for stable UUID5 mapping from SSSF session strings → Claude session-id
@@ -215,7 +216,7 @@ def _build_cmd(request: PiRequest, claude_session: str, resume: bool) -> list[st
         "--verbose",
         "--model", model,
         "--effort", effort,
-        # Factory phases need tools; acceptEdits matches QuietNet agent lanes
+        # Factory phases need tools; acceptEdits matches a normal agent lane
         "--permission-mode", os.environ.get("SSSF_CLAUDE_PERMISSION_MODE", "acceptEdits"),
     ]
     if resume:
@@ -261,97 +262,139 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
         cwd=request.cwd,
-        env=os.environ.copy(),
+        # #53192: operator_env(), not a raw os.environ.copy() — the agent
+        # subprocess must never see the real repo's GIT_* vars once cwd is
+        # routed to a disposable isolation copy. request.env, when the caller
+        # supplied one (isolation.agent_env(), PWD/OLDPWD scrubbed too).
+        env=request.env if request.env is not None else operator_env(),
+        **agent_budget.popen_kwargs_for_tree_kill(),
     )
-    if on_spawn:
-        on_spawn(process.pid)
-
-    # Resume turns append; first create truncates so a phase file is one agent call stream
-    raw_mode = "a" if resume else "w"
-    with raw_path.open(raw_mode, encoding="utf-8") as raw:
-        assert process.stdout is not None
-        for line in process.stdout:
-            raw.write(line)
-            raw.flush()
-            line = line.strip()
-            if not line:
-                continue
+    # #53193: CREATE_SUSPENDED + atomic Job Object assignment + resume (see
+    # agent_pi.run's matching comment); `kill_token` released exactly once
+    # in the `finally` below, on every exit path. Both this and `on_spawn()`
+    # run INSIDE the protected try below (declared here so the `finally`
+    # always has a real value even if `track_for_kill` itself is what
+    # raises) — see agent_pi.run's matching comment for why.
+    kill_token: Optional[int] = None
+    try:
+        kill_token = agent_budget.track_for_kill(process.pid)
+        if on_spawn:
+            on_spawn(process.pid)
+        deadline = (request.deadline if request.deadline is not None
+                   else time.monotonic() + request.timeout_seconds)
+        # Resume turns append; first create truncates so a phase file is one agent call stream
+        raw_mode = "a" if resume else "w"
+        with raw_path.open(raw_mode, encoding="utf-8") as raw:
+            assert process.stdout is not None
+            reader = agent_budget.TimeoutLineReader(process.stdout)
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+                for line in reader.lines(deadline, request.timeout_seconds):
+                    raw.write(line)
+                    raw.flush()
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-            # Final result line (also appears as last event in stream-json)
-            if event.get("type") == "result":
-                final_payload = event
-                text = event.get("result") or ""
-                if isinstance(text, str):
-                    result.text = text
-                tokens, cost, ctx_tok, ctx_win = _usage_from_result(event, result.usage)
-                result.tokens += tokens
-                result.cost += cost
-                if ctx_tok:
-                    result.context_tokens = ctx_tok
-                if ctx_win:
-                    result.context_window = ctx_win
-                if event.get("session_id"):
-                    # Keep SSSF id in result.session_id; Claude uuid is in raw
+                    # Final result line (also appears as last event in stream-json)
+                    if event.get("type") == "result":
+                        final_payload = event
+                        text = event.get("result") or ""
+                        if isinstance(text, str):
+                            result.text = text
+                        tokens, cost, ctx_tok, ctx_win = _usage_from_result(event, result.usage)
+                        result.tokens += tokens
+                        result.cost += cost
+                        if ctx_tok:
+                            result.context_tokens = ctx_tok
+                        if ctx_win:
+                            result.context_window = ctx_win
+                        if event.get("session_id"):
+                            # Keep SSSF id in result.session_id; Claude uuid is in raw
+                            pass
+
+                    # Streaming assistant text (partial) — last full text wins if no result yet
+                    if event.get("type") == "assistant" and not result.text:
+                        message = event.get("message") or {}
+                        parts = []
+                        for block in message.get("content") or []:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                parts.append(block.get("text") or "")
+                        if parts:
+                            result.text = "".join(parts)
+
+                    # Tool tracking for tracer
+                    tool_record = tracker.observe(event)
+                    if tool_record and on_event:
+                        # agents._event_forwarder expects pi-shaped events; pass a synthetic
+                        # tool_execution_end so the existing tracker path still works if used,
+                        # OR emit directly via on_event with our record wrapped.
+                        on_event({
+                            "type": "tool_execution_end",
+                            "toolCallId": tool_record.get("tool_call_id"),
+                            "toolName": tool_record.get("tool"),
+                            "args": tool_record.get("args"),
+                            "isError": not tool_record.get("ok", True),
+                            "result": {"content": [{"type": "text",
+                                                    "text": tool_record.get("result_snippet", "")}]},
+                            "_qn_tool_record": tool_record,
+                        })
+                    elif on_event:
+                        on_event(event)
+            except agent_budget.AgentInterrupt:
+                # Same contract as agent_pi.run — see its docstring note.
+                agent_budget.kill_process_tree(process.pid)
+                reader.close()
+                if on_exit:
+                    on_exit(process.pid)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
                     pass
+                raise
 
-            # Streaming assistant text (partial) — last full text wins if no result yet
-            if event.get("type") == "assistant" and not result.text:
-                message = event.get("message") or {}
-                parts = []
-                for block in message.get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(block.get("text") or "")
-                if parts:
-                    result.text = "".join(parts)
+        stderr = process.stderr.read() if process.stderr else ""
+        result.returncode = process.wait()
+        if on_exit:
+            on_exit(process.pid)
 
-            # Tool tracking for tracer
-            tool_record = tracker.observe(event)
-            if tool_record and on_event:
-                # agents._event_forwarder expects pi-shaped events; pass a synthetic
-                # tool_execution_end so the existing tracker path still works if used,
-                # OR emit directly via on_event with our record wrapped.
-                on_event({
-                    "type": "tool_execution_end",
-                    "toolCallId": tool_record.get("tool_call_id"),
-                    "toolName": tool_record.get("tool"),
-                    "args": tool_record.get("args"),
-                    "isError": not tool_record.get("ok", True),
-                    "result": {"content": [{"type": "text",
-                                            "text": tool_record.get("result_snippet", "")}]},
-                    "_qn_tool_record": tool_record,
-                })
-            elif on_event:
-                on_event(event)
+        # Claude sometimes exits non-zero after a usable stream (hooks, SIGPIPE on
+        # early reader close). Prefer a parsed result text when present.
+        if not result.text and final_payload.get("result"):
+            text = final_payload.get("result")
+            if isinstance(text, str):
+                result.text = text
 
-    stderr = process.stderr.read() if process.stderr else ""
-    result.returncode = process.wait()
-    if on_exit:
-        on_exit(process.pid)
-
-    # Claude sometimes exits non-zero after a usable stream (hooks, SIGPIPE on
-    # early reader close). Prefer a parsed result text when present.
-    if not result.text and final_payload.get("result"):
-        text = final_payload.get("result")
-        if isinstance(text, str):
-            result.text = text
-
-    if final_payload.get("is_error") and not result.text:
-        err_bits = final_payload.get("errors") or final_payload.get("subtype") or final_payload.get("terminal_reason")
-        raise RuntimeError(
-            f"claude error: {err_bits!r} (returncode={result.returncode}; "
-            f"stderr={(stderr or '').strip()[-400:]!r})"
-        )
-    if result.returncode != 0 and not result.text:
-        raise RuntimeError(
-            f"claude exited {result.returncode}: {(stderr or '').strip()[-800:]}"
-        )
-    return result
+        if final_payload.get("is_error") and not result.text:
+            err_bits = final_payload.get("errors") or final_payload.get("subtype") or final_payload.get("terminal_reason")
+            raise RuntimeError(
+                f"claude error: {err_bits!r} (returncode={result.returncode}; "
+                f"stderr={(stderr or '').strip()[-400:]!r})"
+            )
+        if result.returncode != 0 and not result.text:
+            raise RuntimeError(
+                f"claude exited {result.returncode}: {(stderr or '').strip()[-800:]}"
+            )
+        return result
+    except Exception:
+        # Catches anything that escapes above without the process already
+        # being handled (most notably track_for_kill/on_spawn raising).
+        # kill_process_tree is a safe no-op on an already-dead pid.
+        agent_budget.kill_process_tree(process.pid)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        agent_budget.release_tracking(process.pid, kill_token)
 
 
 def run_continue(request: PiRequest, **kwargs) -> PiResult:

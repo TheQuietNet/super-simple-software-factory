@@ -27,15 +27,24 @@ def operator_env() -> dict[str, str]:
     Stripping the venv restores parity: `python3` in an agent's bash is the
     same `python3` the engineer gets in their terminal. The ADW's own imports
     are unaffected; this env is only ever handed to child processes.
+
+    #53192: every `GIT_*` variable is also stripped (`isolation.scrub_git_env`)
+    — a leaked `GIT_DIR`/`GIT_WORK_TREE` from the parent process would let an
+    agent's git commands silently operate on the REAL repo regardless of the
+    `cwd` its subprocess is launched with (git honors these unconditionally,
+    ahead of cwd). This is unconditional for every subprocess this env is
+    handed to, agent or quality-check alike — none of them has any legitimate
+    reason to see one of these set.
     """
+    from .isolation import scrub_git_env   # local import: isolation -> permissions, no cycle risk here
+
     env = os.environ.copy()
     venv = env.pop("VIRTUAL_ENV", "")
-    if not venv:
-        return env
-    venv_bin = str(Path(venv) / "bin")
-    parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != venv_bin]
-    env["PATH"] = os.pathsep.join(parts)
-    return env
+    if venv:
+        venv_bin = str(Path(venv) / "bin")
+        parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != venv_bin]
+        env["PATH"] = os.pathsep.join(parts)
+    return scrub_git_env(env)
 
 
 def new_id(length: int = 8) -> str:
@@ -57,7 +66,7 @@ def resolve_prompt(arg: str) -> str:
     try:
         p = Path(arg)
         if p.is_file():
-            return p.read_text()
+            return p.read_text(encoding="utf-8")
     except OSError:
         pass
     return arg
@@ -69,7 +78,8 @@ def engineer_name() -> str:
         return name
     try:
         out = subprocess.run(["git", "config", "user.name"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5,
+                             encoding="utf-8", errors="replace")
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
     except OSError:
