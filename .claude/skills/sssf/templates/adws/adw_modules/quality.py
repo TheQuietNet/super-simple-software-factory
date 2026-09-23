@@ -8,10 +8,11 @@ deciding.
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  REPLACE THE PLACEHOLDER COMMANDS BELOW.                                     ║
 ║                                                                              ║
-║  Every block ships as an `echo` that exits 0 and announces it is fake. They   ║
-║  are placeholders on purpose: a stamped repo has no way to guess your test    ║
-║  runner, and a wrong-but-plausible command that silently passes is worse      ║
-║  than one that says so out loud.                                             ║
+║  Every unconfigured block FAILS LOUDLY (writes to stderr, exits 1). They are  ║
+║  placeholders on purpose: a stamped repo has no way to guess your test       ║
+║  runner, and a wrong-but-plausible command that silently passes is worse     ║
+║  than one that says so out loud. Same for TEST_GLOB below matching zero      ║
+║  files — an empty glob is a FAILURE, never a quiet "0 tests, exit 0".        ║
 ║                                                                              ║
 ║  For each block you want: swap `_placeholder(...)` for the real argv, e.g.    ║
 ║      argv=["bun", "test", "apps/web/server.test.ts"]                         ║
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -45,11 +47,37 @@ from .utils import now_iso, operator_env
 # stack trace can't swamp the next agent's context.
 TAIL_CHARS = 4_000
 
+# Single named constant `gates.new_tests_are_discoverable` reads too (both
+# must agree on what the runner actually collects). PLACEHOLDER value — set
+# this to your real test runner's own glob before wiring up `test()` below,
+# e.g. "tests/**/*.test.js", "tests/**/test_*.py", "src/**/*_test.go".
+TEST_GLOB = "tests/**/*.test.PLACEHOLDER"
+
+
+def glob_test_files(repo_root: str | Path, pattern: str = TEST_GLOB) -> list[Path]:
+    """Files matching TEST_GLOB. Empty is a FAILURE, not a pass — a stamped-
+    but-unwired repo (or a real runner whose glob quietly matches nothing)
+    must never report a silent green."""
+    return sorted(p for p in Path(repo_root).glob(pattern) if p.is_file())
+
+
+def _fail_loud(message: str) -> list[str]:
+    """Portable (no shell, no node/echo dependency) fail-closed argv — writes
+    to stderr and exits 1. Used for every unconfigured quality block and for
+    an empty TEST_GLOB match, so a stamped-but-unwired repo never reports a
+    silent green. `sys.executable -c` rather than `echo`/`node`: it resolves
+    on every platform this harness runs on without assuming a language
+    runtime the target repo may not have.
+    """
+    return [sys.executable, "-c",
+            f"import sys; print({message!r}, file=sys.stderr); sys.exit(1)"]
+
 
 def _placeholder(name: str) -> list[str]:
-    """A command that does nothing and admits it. Replace every call to this."""
-    return ["echo", f"PLACEHOLDER {name}: edit adws/adw_modules/quality.py and "
-                    f"replace this echo with the real {name} command"]
+    """Unconfigured gate — must fail loudly, never a silent echo-0 pass."""
+    return _fail_loud(
+        f"PLACEHOLDER {name}: unconfigured — edit adws/adw_modules/quality.py "
+        f"and replace this with the real {name} command")
 
 
 def _check_dir(run, name: str) -> Path:
@@ -59,12 +87,14 @@ def _check_dir(run, name: str) -> Path:
     return path
 
 
-def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
+def _run(spec: QualityCheckSpec, run, extra_env: dict[str, str] | None = None) -> QualityCheckResult:
     phase = run.phases[-1]
     output_dir = _check_dir(run, spec.name)
     output_artifact = output_dir / "command.log"
     command = shlex.join(spec.argv)
     env = operator_env()             # the engineer's own shell environment
+    if extra_env:
+        env = {**env, **extra_env}
 
     run.console.note(f"quality {spec.name}: {command}")
     started_at = now_iso()
@@ -78,6 +108,8 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=spec.timeout_seconds,
         )
         returncode = completed.returncode
@@ -96,7 +128,8 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
     duration = time.monotonic() - clock
     output_artifact.write_text(
         f"$ {command}\nexit: {returncode}\nduration_seconds: {duration:.3f}\n"
-        f"\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n"
+        f"\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n",
+        encoding="utf-8",
     )
     passed = returncode == 0
     run.tracer.event(EventRecord(
@@ -135,31 +168,33 @@ def _run(spec: QualityCheckSpec, run) -> QualityCheckResult:
 # ── Blocks ────────────────────────────────────────────────────────────────────
 # Replace every argv below. See the banner at the top of this file.
 
-# Same glob the test runner receives. `gates.new_tests_are_discoverable`
-# fnmatches claimed test paths against this. Replace TEST_GLOB together with
-# `test()`'s argv when you change runners. Empty or PLACEHOLDER → the gate
-# fails closed (no not-applicable branch).
-TEST_GLOB = "tests/**/*.test.js"
-
-
 def test(run) -> QualityCheckResult:
-    """Run the project's test suite. The highest-value block to wire up first."""
+    """Run the project's test suite. The highest-value block to wire up first.
+
+    Unconfigured (TEST_GLOB still the PLACEHOLDER value, or your real glob
+    matching zero files) FAILS LOUDLY rather than silently passing — see the
+    module banner and `_fail_loud`.
+    """
+    files = glob_test_files(run.repo_root, TEST_GLOB)
+    if not files:
+        return _run(QualityCheckSpec(
+            name="test",
+            area="backend",
+            operation="build",
+            argv=_fail_loud(f"empty test glob {TEST_GLOB}: 0 files matched — "
+                            f"set quality.TEST_GLOB to your real test runner's "
+                            f"glob and wire up the real test command"),
+            timeout_seconds=30,
+        ), run)
     return _run(QualityCheckSpec(
         name="test",
         area="backend",
         operation="build",
-        # REAL command for this repo — this IS package.json's "test" script,
-        # invoked directly rather than through npm.
-        #
-        # WHY NOT ["npm", "test"]: on Windows npm is a .cmd shim, and
-        # subprocess.run with an argv list and no shell cannot exec a .cmd —
-        # it fails with exit 127 / WinError 2 (hit live 2026-08-23). `node` is a
-        # real .exe, so a bare-name argv resolves on Windows, macOS and Linux
-        # alike, which keeps this repo's gate portable across the fleet.
-        #
-        # The glob stays a single literal argument: node --test expands it
-        # itself (Node 22+), exactly as the quoted form in package.json does.
-        argv=["node", "--test", TEST_GLOB],
+        # Placeholder until wired up — see the module banner. Replace with the
+        # real invocation, e.g. ["uv", "run", "pytest", "-q"] or
+        # ["bun", "test"]. Keep argv a LIST (never a shell string) and call
+        # binaries by bare name (never an absolute, machine-specific path).
+        argv=_placeholder("test"),
         timeout_seconds=600,
     ), run)
 
@@ -236,14 +271,11 @@ def run_quality(run) -> QualityResult:
     The runner did its job; the CODE is what failed. Hand this result to the
     builder and let the bounded repair loop decide the run's fate.
     """
-    # ONLY `test` is wired for this repo. lint / typecheck / build are left
-    # defined but deliberately OUT of this list: they still return
-    # _placeholder(...) echoes that exit 0, and a check that always passes is
-    # worse than no check — it reports green while measuring nothing. Add one
-    # back the same day you give it a real argv, not before.
-    #
-    # This repo has no lint, typecheck, or build step configured (plain CommonJS
-    # Node, no TS, no bundler), so `test` is the whole quality gate today.
+    # ONLY `test` is wired here by default. lint / typecheck / build are left
+    # defined but deliberately OUT of this list until they have a real argv:
+    # an unconfigured block now fails loudly rather than echoing 0, but a
+    # check that always fails is still noise, not signal — add one back the
+    # same day you give it a real argv, not before.
     blocks: list[Callable] = [
         test,
     ]

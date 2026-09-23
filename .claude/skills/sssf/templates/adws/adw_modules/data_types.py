@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Literal, Optional, Type
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, StrictInt, ValidationInfo, field_validator
 
 PhaseKind = Literal["engineer", "agent", "code"]
 PhaseStatus = Literal["queued", "running", "success", "fail"]
@@ -320,6 +320,23 @@ class AgentConfig(BaseModel):
     #   [...] -> only these. A trailing "/" means a directory prefix; a "*"
     #            makes it a glob; anything else is an exact path.
     writes: Optional[list[str]] = None
+    # Wall-clock budget for the whole phase (every turn: first prompt, JSON
+    # retries, gate/permission corrections). #53193: a hung or looping coding
+    # agent otherwise blocks a phase forever. Mirrors
+    # `ConfigDefaults.timeout_seconds`'s default so a bare `AgentConfig(...)`
+    # built outside `load_config` still has a sane budget; `load_config`
+    # overwrites this from the roster's `defaults.timeout_seconds` unless the
+    # agent names its own. Validated (positive int) in `agents.validate`, not
+    # here — see that function's docstring for why a POSITIVE-VALUE constraint
+    # is the wrong layer for it. TYPE strictness is a different question:
+    # `StrictInt` (round-2 reviewer finding) rejects `true`/`300.0`/`"300"` at
+    # parse time — pydantic's default lax `int` silently coerces all three
+    # (bool IS an int subclass, so plain `int` accepts `True` as `1`), which
+    # would turn a YAML typo into a quietly-wrong budget instead of a loud
+    # config error. `agents.validate`'s own check still catches 0/negative
+    # AFTER this passes — StrictInt only narrows the accepted TYPE, not the
+    # range.
+    timeout_seconds: StrictInt = 300
 
 
 class ConfigDefaults(BaseModel):
@@ -329,6 +346,23 @@ class ConfigDefaults(BaseModel):
     color: str = ""
     harness_engineering: list[str] = Field(default_factory=list)
     tools: Optional[list[str]] = None    # roster-wide allowlist; None = all tools usable
+    # Roster-wide default phase budget; an agent overrides with its own
+    # `timeout_seconds`. #53193 recommended defaults: builder 900s, planner
+    # 600s, every other role 300s (set per-agent in the roster yaml, not
+    # here — see adw_sssf_config/sssf.config.yaml). StrictInt — see
+    # AgentConfig.timeout_seconds's docstring.
+    timeout_seconds: StrictInt = 300
+    # loop_guard.LoopGuardConfig knobs, roster-wide (#53193 ac 3) — not
+    # per-agent: the pattern that matters (N-in-a-row, or an A/B cycle) does
+    # not vary by role the way a timeout budget does.
+    loop_repeat_count: int = 4          # N identical MUTATING tool calls in a row
+    # Round-2 reviewer finding: a read-only/inspection call (read, ls, grep,
+    # find) or a bash test-run (`pytest`, `node --test`, ...) repeated 4x is
+    # often legitimate iteration, not a stuck agent — e.g. re-running the
+    # suite after each fix. Those get a higher bar before they count as a
+    # loop; see loop_guard._is_low_risk.
+    loop_read_only_repeat_count: int = 8
+    loop_cycle_count: int = 3      # A,B,A,B,... full periods
     # Off-limits to every agent that has not named them in its own `writes`.
     # The factory's own code is the default: an agent must not be able to edit
     # the machinery that decides whether its work passed.
@@ -383,6 +417,27 @@ class PiRequest(BaseModel):
     tools: Optional[list[str]] = None
     extensions: list[str] = Field(default_factory=list)
     cwd: str = "."                  # set from run.repo_root — the codebase root agents work in
+    # #53193: the phase's NOMINAL configured budget — constant across every
+    # turn of a phase (round-3 reviewer finding: no longer a shrinking
+    # per-turn slice). Used only for the message an adapter's PhaseTimeout
+    # carries; the actual enforcement point is `deadline` below. StrictInt
+    # for consistency with AgentConfig/ConfigDefaults, though every caller
+    # already hands this a genuine int.
+    timeout_seconds: StrictInt = 300
+    # #53193 round-3 reviewer finding #5: the ABSOLUTE `time.monotonic()`
+    # cutoff for this call, threaded straight from agents.execute's single
+    # `phase_deadline` with no flooring anywhere. `None` (the default) means
+    # "derive one from timeout_seconds relative to now" — used by every
+    # adapter when run() is called directly/standalone (e.g. in tests) with
+    # no phase context to inherit a deadline from. agents.py's `send()`
+    # always sets this explicitly.
+    deadline: Optional[float] = None
+    # #53192: explicit env for the agent subprocess. None (every caller
+    # before this ticket, and every test that constructs a PiRequest
+    # directly) falls back to utils.operator_env() inside each runner, same
+    # as before. agents.execute() always supplies isolation.agent_env(),
+    # which is operator_env() plus PWD/OLDPWD scrubbed of the real repo path.
+    env: Optional[dict[str, str]] = None
 
 
 class UsageBreakdown(BaseModel):

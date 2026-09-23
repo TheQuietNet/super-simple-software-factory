@@ -32,6 +32,9 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                description="Turn the request into an implementable plan")) as ph:
         plan = ph.call(AgentCall(output_type=PlanOutput, prompt=prompt,
                                  gates=[gates.artifacts_exist, gates.files_non_empty]))
+        # Freeze plan.md's file scope now, while it still reflects only the
+        # planner's own gated output — see gates.pin_plan_scope.
+        gates.pin_plan_scope(run)
 
     with run.phase(PhaseParams(name="build", kind="agent", owner="builder", retries=1,
                                description="Implement the plan exactly")) as ph:
@@ -43,8 +46,13 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         message = build.commit_message or f"sssf({run.adw_id}): {build.summary}"
         # Only the agents' own change-set — see git_helper.commit_paths.
         touched = getattr(run, "agent_touched_paths", [])
-        ph.log(sha=git_helper.commit_paths(message, touched),
-               message=message, staged=touched)
+        # Defense in depth — never stage a touched path outside the
+        # requested scope, even if it slipped past claims_are_in_requested_scope.
+        kept, excluded = gates.scoped_for_commit(run, touched)
+        if excluded:
+            ph.log(excluded_from_commit=excluded, reason="outside requested scope")
+        ph.log(sha=git_helper.commit_paths(message, kept),
+               message=message, staged=kept)
         run.agent_touched_paths = []
 
     return run.finish()

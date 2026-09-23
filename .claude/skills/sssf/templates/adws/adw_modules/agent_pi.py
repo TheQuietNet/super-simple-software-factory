@@ -16,6 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import agent_budget
 from .data_types import PiRequest, PiResult
 from .utils import now_iso, operator_env
 
@@ -33,7 +34,7 @@ def _resolve_pi_path() -> str:
         # Pi 0.84+ ships as @earendil-works; older installs were @mariozechner.
         # Prefer dist/cli.js over pi.cmd — cmd.exe mangles multiline
         # --system-prompt and pi then exits after a session header only
-        # (ywh-52340 first builder: 1.7s, empty JSON).
+        # (observed live: first builder turn returned in 1.7s with empty JSON).
         for scope in ("@earendil-works", "@mariozechner"):
             for rel in (
                 Path("pi-coding-agent") / "dist" / "cli.js",
@@ -146,7 +147,7 @@ def _context_tokens(usage: dict) -> int:
 
 def context_window(provider: str, model_id: str) -> int:
     """The model's context ceiling from pi's merged model catalog."""
-    registry = json.loads(Path(MODELS_JSON).read_text())
+    registry = json.loads(Path(MODELS_JSON).read_text(encoding="utf-8"))
     for model in registry.get("providers", {}).get(provider, {}).get("models", []):
         if model.get("id") == model_id:
             return int(model.get("contextWindow") or 0)
@@ -289,44 +290,113 @@ def run(request: PiRequest, on_event: Optional[Callable[[dict], None]] = None,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, encoding="utf-8", errors="replace",
                                bufsize=1, cwd=request.cwd,
-                               env=operator_env())
-    if on_spawn:
-        on_spawn(process.pid)
-    with raw_path.open("a", encoding="utf-8") as raw:
-        assert process.stdout is not None
-        for line in process.stdout:
-            raw.write(line)
-            raw.flush()                      # events land on disk as they happen
-            line = line.strip()
-            if not line:
-                continue
+                               # request.env (isolation.agent_env(), when the
+                               # caller is agents.execute) if the caller
+                               # supplied one, else the old default.
+                               env=request.env if request.env is not None else operator_env(),
+                               **agent_budget.popen_kwargs_for_tree_kill())
+    # Windows Job Object, assigned atomically at spawn time (the process was
+    # created CREATE_SUSPENDED — see popen_kwargs_for_tree_kill — so nothing
+    # in it can run, including spawning its own children, before this call
+    # has assigned it and resumed it). `kill_token` MUST be released exactly
+    # once, in the `finally` below, on every exit path — not just the kill
+    # path — or a normal turn leaks one Job Object handle forever (round-3
+    # finding #2).
+    #
+    # Round-4 reviewer finding #2: `track_for_kill()` and `on_spawn()` used
+    # to run BEFORE this try/finally — if either raised (a tracer callback
+    # hitting a locked db, `track_for_kill` itself raising
+    # ProcessResumeFailed), the child process was never killed and
+    # `kill_token` was never released: an orphaned process AND a leaked Job
+    # Object handle, from the exact code meant to prevent both. Declared
+    # here (not inside the try) so the `finally` always has a real value to
+    # release even if `track_for_kill` itself is what raised; both calls now
+    # run INSIDE the protected region below.
+    kill_token: Optional[int] = None
+    try:
+        kill_token = agent_budget.track_for_kill(process.pid)
+        if on_spawn:
+            on_spawn(process.pid)
+        # Round-3 reviewer finding #5: absolute, sub-second-precise deadline
+        # — `request.deadline` when the caller (agents.py's send()) set one,
+        # else derived from `timeout_seconds` relative to THIS moment (a
+        # standalone/test call with no phase context to inherit from).
+        deadline = (request.deadline if request.deadline is not None
+                   else time.monotonic() + request.timeout_seconds)
+        with raw_path.open("a", encoding="utf-8") as raw:
+            assert process.stdout is not None
+            reader = agent_budget.TimeoutLineReader(process.stdout)
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") == "message_end":
-                message = event.get("message", {})
-                if message.get("role") == "assistant":
-                    text = _text_of(message)
-                    if text:
-                        result.text = text   # last assistant message wins
-                    usage = message.get("usage", {}) or {}
-                    turn = _context_tokens(usage)
-                    result.tokens += turn
-                    result.usage.add_turn(usage, turn)
-                    # Occupancy is read off the last VALID assistant turn, the
-                    # way pi does it — an aborted or errored turn reports usage
-                    # you can't trust, so it must not overwrite a good reading.
-                    if turn and message.get("stopReason") not in ("aborted", "error"):
-                        result.context_tokens = turn
-                    result.cost += (usage.get("cost", {}) or {}).get("total", 0.0) or 0.0
-            if on_event:
-                on_event(event)
+                for line in reader.lines(deadline, request.timeout_seconds):
+                    raw.write(line)
+                    raw.flush()                      # events land on disk as they happen
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") == "message_end":
+                        message = event.get("message", {})
+                        if message.get("role") == "assistant":
+                            text = _text_of(message)
+                            if text:
+                                result.text = text   # last assistant message wins
+                            usage = message.get("usage", {}) or {}
+                            turn = _context_tokens(usage)
+                            result.tokens += turn
+                            result.usage.add_turn(usage, turn)
+                            # Occupancy is read off the last VALID assistant turn, the
+                            # way pi does it — an aborted or errored turn reports usage
+                            # you can't trust, so it must not overwrite a good reading.
+                            if turn and message.get("stopReason") not in ("aborted", "error"):
+                                result.context_tokens = turn
+                            result.cost += (usage.get("cost", {}) or {}).get("total", 0.0) or 0.0
+                    if on_event:
+                        on_event(event)
+            except agent_budget.AgentInterrupt:
+                # A phase-timeout expiry OR a detected tool-call loop — either
+                # way the current turn must stop NOW. Kill the whole tree
+                # (bash tool calls spawn their own children pi itself does not
+                # track — including an orphaned grandchild if pi itself already
+                # exited, round-2 reviewer finding), then a BOUNDED, deterministic
+                # reader shutdown (round-3 finding #3: never blocks on the kill
+                # having actually reached every writer), close the `processes`
+                # row the same way a clean exit would, then re-raise the
+                # ORIGINAL exception so agents.py can tell a timeout from a loop.
+                agent_budget.kill_process_tree(process.pid)
+                reader.close()
+                if on_exit:
+                    on_exit(process.pid)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise
 
-    stderr = process.stderr.read() if process.stderr else ""
-    result.returncode = process.wait()
-    if on_exit:
-        on_exit(process.pid)
-    if result.returncode != 0 and not result.text:
-        raise RuntimeError(f"pi exited {result.returncode}: {stderr.strip()[-800:]}")
-    return result
+        stderr = process.stderr.read() if process.stderr else ""
+        result.returncode = process.wait()
+        if on_exit:
+            on_exit(process.pid)
+        if result.returncode != 0 and not result.text:
+            raise RuntimeError(f"pi exited {result.returncode}: {stderr.strip()[-800:]}")
+        return result
+    except Exception:
+        # Round-4 reviewer finding #2: catches anything that escapes the
+        # region above WITHOUT the process already being handled — most
+        # notably `track_for_kill()`/`on_spawn()` raising before the
+        # AgentInterrupt handler even exists yet. `kill_process_tree` is
+        # safe to call on an already-dead pid (ProcessLookupError is
+        # caught internally), so this is a harmless no-op for paths that
+        # already killed it (e.g. `ProcessResumeFailed`, or the
+        # AgentInterrupt branch re-raising) — the point is that NO path
+        # can escape this function with the child still running.
+        agent_budget.kill_process_tree(process.pid)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        agent_budget.release_tracking(process.pid, kill_token)

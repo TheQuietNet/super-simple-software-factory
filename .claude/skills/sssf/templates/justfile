@@ -60,6 +60,19 @@ sdlc *ARGS:
 simple-sdlc *ARGS:
     uv run adws/adw_simple_sdlc.py --config {{config}} "$@"
 
+# ── board -> factory ────────────────────────────────────────────────────────
+# adw_ticket.py: draft the four-line request from a board ticket's own
+# footprint/acceptance, review it, then run the chosen chain against it.
+# Needs a board CLI on PATH (or SSSF_AGENTCTL_CMD set) — see adw_modules/ticket.py.
+
+# draft requests/<TASK>.md from ticket TASK: just ticket-draft 53195
+ticket-draft TASK:
+    uv run adws/adw_ticket.py draft --task {{TASK}}
+
+# claim + run the reviewed draft for TASK: just ticket-run 53195
+ticket-run TASK *ARGS:
+    uv run adws/adw_ticket.py run --task {{TASK}} --from-draft "$@"
+
 # ── watch it ────────────────────────────────────────────────────────────────
 # Reads never block a running workflow, the db is WAL. Poll as hard as you like.
 

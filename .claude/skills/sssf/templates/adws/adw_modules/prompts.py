@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def render(template_path: str | Path, variables: dict[str, str]) -> str:
-    text = Path(template_path).read_text()
+    text = Path(template_path).read_text(encoding="utf-8")
     for key, value in variables.items():
         text = text.replace("{{" + key + "}}", value)
     return text
@@ -17,5 +17,5 @@ def save(directory: str | Path, name: str, content: str) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path

@@ -1,5 +1,14 @@
 # sssf.config.yaml — the factory's agent roster. One agent, one prompt, one purpose.
 # v1 runs the Pi coding agent only; coding_agent: claude_code arrives in v2.
+#
+# ROSTER PATTERN: you are not limited to one config. Copy this file to
+# sssf.<name>.config.yaml and select it per run with `--config` or the
+# SSSF_CONFIG env var (see the justfile's `config :=` line) — e.g. a roster
+# that swaps just the builder onto a stronger/paid model when your default
+# local model keeps failing that one role, while every other agent stays on
+# the cheap default. Keep provider ids and hosts out of THIS file's comments
+# if you maintain more than one roster; put per-roster rationale in the
+# roster file that actually uses it.
 defaults:
   coding_agent: pi
   model: google/gemini-3.6-flash   # provider/id — a bare pattern is ambiguous across providers
@@ -17,6 +26,22 @@ defaults:
     - grep                         # search file contents  (pi default: OFF)
     - find                         # find files by glob     (pi default: OFF)
     - ls                           # list directories       (pi default: OFF)
+  # Roster-wide phase budget (wall-clock, every turn of a phase — first
+  # prompt, JSON retries, gate/permission corrections). A hung or looping
+  # coding agent otherwise blocks a phase forever. Per-agent overrides below
+  # (builder 900s: the longest, most tool-heavy phase; planner 600s: light
+  # on writes but can run long); every other role uses this default.
+  timeout_seconds: 300
+  # loop_guard thresholds — same incident class as timeout_seconds above: N
+  # identical tool calls in a row, or an A/B cycle repeated this many full
+  # periods, triggers one in-session correction; a second trigger fails the
+  # phase.
+  loop_repeat_count: 4
+  # A read-only call (read/ls/grep/find) or a bash test-run (pytest,
+  # node --test, ...) repeated identically is often legitimate iteration,
+  # not a stuck agent — higher bar before it counts.
+  loop_read_only_repeat_count: 8
+  loop_cycle_count: 3
   # Off-limits to every agent that does not name them in its own `writes`.
   # `tools` alone cannot protect these: bash runs `git checkout`, and write
   # reaches any path. An agent must not be able to edit the machinery that
@@ -46,6 +71,7 @@ agents:
     model: fireworks/accounts/fireworks/models/kimi-k3
     thinking: high
     color: "#a78bfa"                 # optional hex — the agent's lane color in the visualizer
+    timeout_seconds: 600             # planning is read/write-light but can run long
     purpose: Turn a request into a plan the builder can implement without asking questions.
     prompt_engineering:
       system: adws/adw_data/prompt_engineering/planner/system.md
@@ -68,6 +94,7 @@ agents:
 
   - name: builder
     color: "#22d3ee"
+    timeout_seconds: 900            # highest budget — the longest, most tool-heavy phase
     purpose: Implement the plan exactly; report every changed file in the envelope.
     prompt_engineering:
       system: adws/adw_data/prompt_engineering/builder/system.md

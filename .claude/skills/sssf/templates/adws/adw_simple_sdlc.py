@@ -75,6 +75,15 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
         """
         message = envelope.commit_message or f"sssf({run.adw_id}): {envelope.summary}"
         touched = getattr(run, "agent_touched_paths", [])
+        # Defense in depth, only for the code commit — a `PlanOutput`/
+        # `DocumentOutput` envelope has no `changed_files` and its own output
+        # (specs/…, app_docs/…) is never Where:-scoped, so commit_plan and
+        # commit_docs must keep staging everything touched, unfiltered.
+        if hasattr(envelope, "changed_files"):
+            kept, excluded = gates.scoped_for_commit(run, touched)
+            if excluded:
+                ph.log(excluded_from_commit=excluded, reason="outside requested scope")
+            touched = kept
         ph.log(sha=git_helper.commit_paths(message, touched),
                message=message, staged=touched)
         run.agent_touched_paths = []
@@ -93,6 +102,9 @@ def main(prompt: str, config: str = "adws/adw_sssf_config/sssf.config.yaml", adw
                                description="Turn the request into an implementable plan")) as ph:
         plan = ph.call(AgentCall(output_type=PlanOutput, prompt=prompt,
                                  gates=[gates.artifacts_exist, gates.files_non_empty]))
+        # Freeze plan.md's file scope now, while it still reflects only the
+        # planner's own gated output — see gates.pin_plan_scope.
+        gates.pin_plan_scope(run)
 
     with run.phase(PhaseParams(name="commit_plan", kind="code", owner="git",
                                description="Put the spec on record before any code exists to blur it")) as ph:

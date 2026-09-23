@@ -73,45 +73,52 @@ def test_claimed_dirty_file_passes(tmp_path: Path):
     assert report.passed
 
 
-def test_ests_near_miss_fails_discoverability():
+def test_ests_near_miss_fails_discoverability(monkeypatch):
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/**/*.test.js")
     report = gates.new_tests_are_discoverable(
         _env(["ests/pull-video-paragraphs.test.js"]), SimpleNamespace())
     assert not report.passed
     assert any("WILL NEVER RUN" in c.note for c in report.checks if not c.ok)
 
 
-def test_discoverable_test_js_passes():
-    """Passes when TEST_GLOB (tests/**/*.test.js) matches."""
+def test_discoverable_test_js_passes(monkeypatch):
+    """Passes when TEST_GLOB matches. quality.TEST_GLOB ships as an
+    unconfigured PLACEHOLDER value (fails closed by default — see
+    test_quality_glob.py), so a real matching glob is set here explicitly."""
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/**/*.test.js")
     report = gates.new_tests_are_discoverable(
         _env(["tests/pull-video-paragraphs.test.js"]), SimpleNamespace())
     assert report.passed
 
 
-def test_pytest_style_path_fails_against_node_test_glob():
-    """F1: tests/test_foo.py is NOT collectable by tests/**/*.test.js.
-    This is adw_id 615f4542 (tests/test_paragraphs.js, suite stayed 493/493)."""
+def test_pytest_style_path_fails_against_node_test_glob(monkeypatch):
+    """tests/test_foo.py is NOT collectable by tests/**/*.test.js."""
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/**/*.test.js")
     report = gates.new_tests_are_discoverable(
         _env(["tests/test_foo.py"]), SimpleNamespace())
     assert not report.passed
     assert any("WILL NEVER RUN" in c.note for c in report.checks if not c.ok)
 
 
-def test_nested_test_js_matches_glob():
+def test_nested_test_js_matches_glob(monkeypatch):
     """One extra directory under tests/ (zero-depth is test_discoverable_test_js)."""
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/**/*.test.js")
     report = gates.new_tests_are_discoverable(
         _env(["tests/nested/foo.test.js"]), SimpleNamespace())
     assert report.passed
 
 
-def test_deep_nested_test_js_matches_glob():
-    """Oracle (2): tests/a/b/foo.test.js PASSES (3.12 Path.match ** is one segment)."""
+def test_deep_nested_test_js_matches_glob(monkeypatch):
+    """Oracle (2): tests/a/b/foo.test.js PASSES (** crosses directories)."""
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/**/*.test.js")
     report = gates.new_tests_are_discoverable(
         _env(["tests/a/b/foo.test.js"]), SimpleNamespace())
     assert report.passed
 
 
-def test_src_tests_does_not_match_rooted_glob():
-    """Oracle (1): src/tests/foo.test.js FAILS — Path.match matches from the right."""
+def test_src_tests_does_not_match_rooted_glob(monkeypatch):
+    """Oracle (1): src/tests/foo.test.js FAILS against a tests/-rooted glob."""
+    monkeypatch.setattr(quality, "TEST_GLOB", "tests/**/*.test.js")
     report = gates.new_tests_are_discoverable(
         _env(["src/tests/foo.test.js"]), SimpleNamespace())
     assert not report.passed
@@ -186,7 +193,8 @@ def test_commit_paths_stages_only_listed(tmp_path: Path, monkeypatch):
     sha = git_helper.commit_paths("agent only", ["agent.js"])
     assert sha
     names = subprocess.check_output(
-        ["git", "show", "--name-only", "--pretty=", "HEAD"], cwd=repo, text=True)
+        ["git", "show", "--name-only", "--pretty=", "HEAD"], cwd=repo, text=True,
+        encoding="utf-8", errors="replace")
     assert "agent.js" in names
     assert "operator.js" not in names
 

@@ -77,7 +77,8 @@ def capture(run, params: ChangeCapture) -> ChangeSet:
         f"# +{insertions} -{deletions} across {len(files)} tracked file(s)\n\n"
         f"## stat\n{stat or '  (no tracked changes)'}\n\n"
         f"## untracked files\n{untracked_block}\n\n"
-        f"## diff\n{text}\n")
+        f"## diff\n{text}\n",
+        encoding="utf-8")
 
     return ChangeSet(base=base, files=files, untracked=untracked,
                      insertions=insertions, deletions=deletions, stat=stat,
