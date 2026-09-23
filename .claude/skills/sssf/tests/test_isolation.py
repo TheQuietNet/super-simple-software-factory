@@ -13,10 +13,15 @@ from conftest import FakeRun, agent, config, dirty
 
 
 @pytest.fixture(autouse=True)
-def _isolated_root(tmp_path, monkeypatch):
+def _isolated_root(tmp_path_factory, monkeypatch):
     """Every test gets its own isolation root — never the shared system temp
-    dir, so parallel test runs (and reruns) never collide on a stale copy."""
-    monkeypatch.setenv(isolation.ROOT_OVERRIDE_ENV, str(tmp_path / "iso-root"))
+    dir (so parallel test runs and reruns never collide on a stale copy),
+    and deliberately NOT nested under the `repo` fixture's own `tmp_path`
+    (a `tmp_path`-derived subdirectory of the real repo would make every
+    isolation-copy path contain the repo path as a literal prefix, which
+    defeats the point of several assertions below)."""
+    monkeypatch.setenv(isolation.ROOT_OVERRIDE_ENV,
+                       str(tmp_path_factory.mktemp("iso-root")))
 
 
 def _run(repo: Path, adw_id: str = "tiso") -> FakeRun:
