@@ -24,9 +24,13 @@ A breach is NOT a gate violation. Gates are for work an agent can be asked to
 redo; a breach cannot be corrected by re-prompting, because the write already
 happened. It aborts the phase and names every offending path.
 
-Two keys drive it, both in sssf.config.yaml:
-    defaults.protected_files   paths no agent may touch unless it names them itself
-    agents[].writes      None = unrestricted · [] = read-only · [...] = only these
+Keys in sssf.config.yaml:
+    defaults.protected_files    paths no agent may touch unless named in writes/unlock
+    defaults.protected_tracked  like protected_files, but only for already-tracked paths
+                                (new untracked files under the prefix stay writable) (#54059)
+    agents[].writes             None = unrestricted · [] = read-only · [...] = whitelist
+    agents[].unlock             additive protected exceptions; does NOT flip unrestricted
+                                into whitelist-only (#54059 AC2 — use for product scripts/)
 
 THREAT MODEL: this module defends against a careless or confused agent — one
 that edits the wrong file, reverts an operator's WIP, or stages something it
@@ -598,9 +602,17 @@ def permitted(path: str, agent: AgentConfig, cfg: SSSFConfig,
     empty so a caller that cannot cheaply supply it degrades to the pre-existing
     prefix behaviour rather than failing open on a name it cannot classify.
     """
+    # #54059: unlock is additive — overrides protected_* without flipping
+    # unrestricted agents into whitelist-only (unlike a non-None writes list).
+    if any(_matches(path, p) for p in (agent.unlock or [])):
+        return True
     if any(_matches(path, p) for p in (agent.writes or [])):
         return True                      # naming a path is what unlocks a protected one
     if any(_matches(path, p) for p in cfg.defaults.protected_files):
+        return False
+    # Tracked-only protect: existing grader tests stay read-only; new files ok.
+    if (path in tracked
+            and any(_matches(path, p) for p in (cfg.defaults.protected_tracked or []))):
         return False
     if any(_matches(path, p) for p in always_writable(cfg)) and path not in tracked:
         return True

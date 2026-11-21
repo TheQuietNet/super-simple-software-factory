@@ -31,6 +31,8 @@ GRADER_DENY = (
 )
 
 # Ordinary product paths an unrestricted builder may still edit.
+# New (untracked) tests/ files stay allowed; existing tracked ones are barred
+# via protected_tracked (tested separately).
 GRADER_ALLOW = (
     "src/feature.js",
     "tests/new-feature.test.js",
@@ -42,8 +44,10 @@ GRADER_ALLOW = (
 def _stock_cfg() -> object:
     live = yaml.safe_load(TEMPLATE_CFG.read_text(encoding="utf-8"))
     protected = list(live["defaults"]["protected_files"])
+    protected_tracked = list(live["defaults"].get("protected_tracked") or [])
     data_dir = live["defaults"].get("data_dir", "adws/adw_data")
-    return config(protected=protected, data_dir=data_dir)
+    return config(protected=protected, protected_tracked=protected_tracked,
+                  data_dir=data_dir)
 
 
 def test_stock_template_permitted_denies_grader_paths():
@@ -77,3 +81,34 @@ def test_stock_template_permitted_rejects_disallowed_writes_list():
 def test_stock_template_protected_files_nonempty():
     cfg = _stock_cfg()
     assert cfg.defaults.protected_files, "stock template must declare protected_files"
+    assert "tests/" in cfg.defaults.protected_tracked, (
+        "stock template must protect existing product tests/ (#54059 AC1)"
+    )
+
+
+def test_stock_template_protected_tracked_bars_existing_product_tests():
+    """Existing tracked tests/ files are read-only; brand-new ones stay writable."""
+    cfg = _stock_cfg()
+    builder = agent("builder", writes=None)
+    tracked = frozenset({"tests/old.test.js", "src/feature.js"})
+    assert not permissions.permitted("tests/old.test.js", builder, cfg, tracked)
+    assert permissions.permitted("tests/brand-new.test.js", builder, cfg, tracked)
+    assert permissions.permitted("src/feature.js", builder, cfg, tracked)
+
+
+def test_unlock_overrides_protected_without_whitelist_flip():
+    """#54059 AC2: unlock lets an unrestricted agent touch one protected path
+    without flipping writes:null into whitelist-only."""
+    cfg = _stock_cfg()
+    builder = agent("builder", writes=None, unlock=["scripts/run-items-batch.js"])
+    assert permissions.permitted(
+        "scripts/run-items-batch.js", builder, cfg, frozenset())
+    # Still unrestricted on ordinary product paths:
+    assert permissions.permitted("src/feature.js", builder, cfg, frozenset())
+    # Other protected paths stay barred:
+    assert not permissions.permitted("justfile", builder, cfg, frozenset())
+    # Contrast: a writes: list would unlock scripts/ but bar src/:
+    whitelisted = agent("builder", writes=["scripts/run-items-batch.js"])
+    assert permissions.permitted(
+        "scripts/run-items-batch.js", whitelisted, cfg, frozenset())
+    assert not permissions.permitted("src/feature.js", whitelisted, cfg, frozenset())
