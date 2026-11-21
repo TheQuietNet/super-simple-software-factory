@@ -319,7 +319,14 @@ class AgentConfig(BaseModel):
     #   []    -> read-only: may modify nothing tracked
     #   [...] -> only these. A trailing "/" means a directory prefix; a "*"
     #            makes it a glob; anything else is an exact path.
+    # Naming a path in `writes` unlocks a protected path, but ANY non-None
+    # `writes` list also flips the agent from unrestricted to whitelist-only
+    # (#54059). Use `unlock` below when an unrestricted agent only needs a
+    # few protected exceptions (e.g. product scripts/) without that flip.
     writes: Optional[list[str]] = None
+    # Additive exceptions to `defaults.protected_files` / `protected_tracked`.
+    # Does NOT change the unrestricted/whitelist posture of `writes`.
+    unlock: Optional[list[str]] = None
     # Wall-clock budget for the whole phase (every turn: first prompt, JSON
     # retries, gate/permission corrections). #53193: a hung or looping coding
     # agent otherwise blocks a phase forever. Mirrors
@@ -363,12 +370,17 @@ class ConfigDefaults(BaseModel):
     # loop; see loop_guard._is_low_risk.
     loop_read_only_repeat_count: int = 8
     loop_cycle_count: int = 3      # A,B,A,B,... full periods
-    # Off-limits to every agent that has not named them in its own `writes`.
-    # The factory's own code is the default: an agent must not be able to edit
-    # the machinery that decides whether its work passed.
+    # Off-limits to every agent that has not named them in its own `writes`
+    # or `unlock`. The factory's own code is the default: an agent must not
+    # be able to edit the machinery that decides whether its work passed.
     protected_files: list[str] = Field(default_factory=lambda: [
         "adws/adw_modules/", "adws/adw_sssf_config/", "adws/adw_*.py",
     ])
+    # Same matching rules as protected_files, but only for paths already in
+    # the git index (#54059). New untracked files under these prefixes stay
+    # writable so an unrestricted builder can add tests (gates.new_tests_*);
+    # weakening an EXISTING grader test is barred.
+    protected_tracked: list[str] = Field(default_factory=list)
     data_dir: str = "adws/adw_data"
 
 

@@ -60,20 +60,23 @@ class FakeRun:
         )
 
 
-def agent(name: str, writes=None, timeout_seconds: int = 300) -> AgentConfig:
+def agent(name: str, writes=None, unlock=None, timeout_seconds: int = 300) -> AgentConfig:
     return AgentConfig(
         name=name,
         writes=writes,
+        unlock=unlock,
         timeout_seconds=timeout_seconds,
         prompt_engineering=PromptEngineering(system="s.md", user="u.md"),
     )
 
 
 def config(protected: list[str] | None = None,
+           protected_tracked: list[str] | None = None,
            data_dir: str = "adws/adw_data") -> SSSFConfig:
     return SSSFConfig(
         defaults=ConfigDefaults(
             protected_files=protected if protected is not None else [],
+            protected_tracked=protected_tracked if protected_tracked is not None else [],
             data_dir=data_dir,
         ),
         agents=[],

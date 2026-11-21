@@ -42,15 +42,20 @@ defaults:
   # not a stuck agent — higher bar before it counts.
   loop_read_only_repeat_count: 8
   loop_cycle_count: 3
-  # Off-limits to every agent that does not name them in its own `writes`.
-  # `tools` alone cannot protect these: bash runs `git checkout`, and write
-  # reaches any path. An agent must not be able to edit the machinery that
-  # decides whether its own work passed. Enforced in adw_modules/permissions.py.
+  # Off-limits to every agent that does not name them in its own `writes`
+  # or `unlock`. `tools` alone cannot protect these: bash runs `git checkout`,
+  # and write reaches any path. An agent must not be able to edit the machinery
+  # that decides whether its own work passed. Enforced in permissions.py.
   #
   # `writes:` per agent says what it may change IN THE REPO. It never restricts
   # the session runtime under data_dir — context_handoff/, envelopes, prompts,
   # raw output. Every agent can always write its own report; `writes: []` means
   # read-only with respect to the repo, not mute.
+  #
+  # `unlock:` (per agent) is the additive exception for protected paths without
+  # flipping an unrestricted agent (writes: null) into whitelist-only (#54059).
+  # Example: builder unlock: [scripts/run-items-batch.js] when scripts/ is
+  # product code the quality gate does not grade.
   protected_files:
     - adws/adw_modules/
     - adws/adw_sssf_config/
@@ -60,6 +65,11 @@ defaults:
     - justfile
     - adws/tests/
     - scripts/
+  # Product tests/ grade ordinary builder work (node --test tests/**/*.test.js).
+  # Protect EXISTING tracked files only — new untracked tests stay writable so
+  # gates.new_tests_are_discoverable keeps working (#54059).
+  protected_tracked:
+    - tests/
   data_dir: adws/adw_data          # runtime home: {data_dir}/sessions/{adw_id}/{agent_name}/
 
 observability:
