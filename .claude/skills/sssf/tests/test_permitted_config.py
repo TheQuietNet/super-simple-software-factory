@@ -94,6 +94,8 @@ def test_stock_template_protected_tracked_bars_existing_product_tests():
     assert not permissions.permitted("tests/old.test.js", builder, cfg, tracked)
     assert permissions.permitted("tests/brand-new.test.js", builder, cfg, tracked)
     assert permissions.permitted("src/feature.js", builder, cfg, tracked)
+    # Case-only variant of a tracked grader test is also barred (Win/macOS).
+    assert not permissions.permitted("Tests/old.test.js", builder, cfg, tracked)
 
 
 def test_unlock_overrides_protected_without_whitelist_flip():

@@ -694,9 +694,16 @@ def _case_insensitive_protection_bypass(rel: str, agent: AgentConfig, cfg) -> bo
     folded = rel.casefold()
     protected_hit = any(permissions._matches(folded, p.casefold())
                         for p in cfg.defaults.protected_files)
+    # #54059: protected_tracked is the same class of grader shield — a
+    # case-only variant of an already-tracked product test must not slip
+    # through apply-back on Windows/macOS.
+    if not protected_hit:
+        protected_hit = any(permissions._matches(folded, p.casefold())
+                            for p in (cfg.defaults.protected_tracked or []))
     if not protected_hit:
         return False
-    unlocked = any(permissions._matches(folded, p.casefold()) for p in (agent.writes or []))
+    unlocked = any(permissions._matches(folded, p.casefold())
+                   for p in (*(agent.writes or []), *(agent.unlock or [])))
     return not unlocked
 
 

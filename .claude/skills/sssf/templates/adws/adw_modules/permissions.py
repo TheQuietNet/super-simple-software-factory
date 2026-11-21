@@ -611,8 +611,12 @@ def permitted(path: str, agent: AgentConfig, cfg: SSSFConfig,
     if any(_matches(path, p) for p in cfg.defaults.protected_files):
         return False
     # Tracked-only protect: existing grader tests stay read-only; new files ok.
-    if (path in tracked
-            and any(_matches(path, p) for p in (cfg.defaults.protected_tracked or []))):
+    # Casefold the tracked membership check so Windows/macOS case-only
+    # variants (Tests/old.test.js vs tests/old.test.js) cannot bypass (#54059).
+    tracked_fold = {t.casefold() for t in tracked}
+    if (path.casefold() in tracked_fold
+            and any(_matches(path.casefold(), p.casefold())
+                    for p in (cfg.defaults.protected_tracked or []))):
         return False
     if any(_matches(path, p) for p in always_writable(cfg)) and path not in tracked:
         return True
